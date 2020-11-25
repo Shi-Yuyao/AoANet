@@ -74,7 +74,7 @@ def compute_doc_freq(crefs):
   document_frequency = defaultdict(float)
   for refs in crefs:
     # refs, k ref captions of one image
-    for ngram in set([ngram for ref in refs for (ngram,count) in ref.iteritems()]):
+    for ngram in set([ngram for ref in refs for (ngram,count) in ref.items()]):
       document_frequency[ngram] += 1
       # maxcounts[ngram] = max(maxcounts.get(ngram,0), count)
   return document_frequency
