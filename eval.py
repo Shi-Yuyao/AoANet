@@ -46,7 +46,7 @@ for k in vars(infos['opt']).keys():  # vars是返回对象（字典）的属性�
             setattr(opt, k, '/data/scene_understanding/bottom-up-feature/adaptive/cocobu_fc')
         elif k == 'input_att_dir':
             setattr(opt, k, '/data/scene_understanding/bottom-up-feature/adaptive/cocobu_att')
-        elif k == 'inputatt_dir'':
+        elif k == 'inputatt_dir':
             setattr(opt, k, '/data/scene_understanding/bottom-up-feature/adaptive/cocobu_box')
         else:
             setattr(opt, k, getattr(opt, k) or getattr(infos['opt'], k, ''))  # setattr设置对象属性值，getattr获取对象属性值
