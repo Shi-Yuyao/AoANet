@@ -39,9 +39,17 @@ with open(opt.infos_path, 'rb') as f:  # 读取infos文件地址，返回文件�
 replace = ['input_fc_dir', 'input_att_dir', 'input_box_dir', 'input_label_h5', 'input_json', 'batch_size', 'id']
 ignore = ['start_from']
 
+# 修改infos的input信息
 for k in vars(infos['opt']).keys():  # vars是返回对象（字典）的属性与键值的函数
     if k in replace:
-        setattr(opt, k, getattr(opt, k) or getattr(infos['opt'], k, ''))  # setattr设置对象属性值，getattr获取对象属性值
+        if k == 'input_fc_dir':  # 暂时修改infos中的地址
+            setattr(opt, k, '/data/scene_understanding/bottom-up-feature/adaptive/cocobu_fc')
+        elif k == 'input_att_dir':
+            setattr(opt, k, '/data/scene_understanding/bottom-up-feature/adaptive/cocobu_att')
+        elif k == 'inputatt_dir'':
+            setattr(opt, k, '/data/scene_understanding/bottom-up-feature/adaptive/cocobu_box')
+        else:
+            setattr(opt, k, getattr(opt, k) or getattr(infos['opt'], k, ''))  # setattr设置对象属性值，getattr获取对象属性值
     elif k not in ignore:
         if not k in vars(opt):
             vars(opt).update({k: vars(infos['opt'])[k]})  # copy over options from model
@@ -52,7 +60,7 @@ vocab = infos['vocab']  # ix -> word mapping
 opt.vocab = vocab  # 将infos的语料库赋值到opt的参数vocab
 model = models.setup(opt)  # 将模型进行按照opt的参数进行初始化
 del opt.vocab
-model.load_state_dict(torch.load(opt.model))  # 将模型加载到torch中
+model.load_state_dict(torch.load(opt.model))  # 将模型加载到torch中(函数为仅加载参数)
 model.cuda()  # 加载cuda
 model.eval()  # 不启用 BatchNormalization 和 Dropout
 crit = utils.LanguageModelCriterion()  # 将LanguageModelCriterion实例化
@@ -71,8 +79,7 @@ loader.ix_to_word = infos['vocab']
 
 # Set sample options
 opt.datset = opt.input_json
-loss, split_predictions, lang_stats = eval_utils.eval_split(model, crit, loader,
-                                                            vars(opt))
+loss, split_predictions, lang_stats = eval_utils.eval_split(model, crit, loader, vars(opt))
 
 print('loss: ', loss)
 if lang_stats:
