@@ -19,9 +19,9 @@ python train.py --id $id \
     --label_smoothing 0.2 \
     --input_json data/cocotalk.json \
     --input_label_h5 data/cocotalk_label.h5 \
-    --input_fc_dir  /home/scene_understanding/bottom-up-feature/adaptive/cocobu_fc \
-    --input_att_dir  /home/scene_understanding/bottom-up-feature/adaptive/cocobu_att  \
-    --input_box_dir  /home/scene_understanding/bottom-up-feature/adaptive/cocobu_box \
+    --input_fc_dir  /data/scene_understanding/bottom-up-feature/adaptive/cocobu_fc \
+    --input_att_dir  /data/scene_understanding/bottom-up-feature/adaptive/cocobu_att  \
+    --input_box_dir  /data/scene_understanding/bottom-up-feature/adaptive/cocobu_box \
     --seq_per_img 5 \
     --batch_size 10 \
     --beam_size 1 \
@@ -55,9 +55,9 @@ python train.py --id $id \
     --dropout_aoa 0.3 \
     --input_json data/cocotalk.json \
     --input_label_h5 data/cocotalk_label.h5 \
-    --input_fc_dir  /home/scene_understanding/bottom-up-feature/adaptive/cocobu_fc \
-    --input_att_dir  /home/scene_understanding/bottom-up-feature/adaptive/cocobu_att  \
-    --input_box_dir  /home/scene_understanding/bottom-up-feature/adaptive/cocobu_box \
+    --input_fc_dir  /data/scene_understanding/bottom-up-feature/adaptive/cocobu_fc \
+    --input_att_dir  /data/scene_understanding/bottom-up-feature/adaptive/cocobu_att  \
+    --input_box_dir  /data/scene_understanding/bottom-up-feature/adaptive/cocobu_box \
     --seq_per_img 5 \
     --batch_size 10 \
     --beam_size 1 \
