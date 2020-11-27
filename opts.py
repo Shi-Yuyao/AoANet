@@ -87,7 +87,7 @@ def parse_opt():
     # Optimization: General
     parser.add_argument('--max_epochs', type=int, default=-1,
                     help='number of epochs')
-    parser.add_argument('--batch_size', type=int, default=16,
+    parser.add_argument('--batch_size', type=int, default=1,
                     help='minibatch size')
     parser.add_argument('--grad_clip', type=float, default=0.1, #5.,
                     help='clip gradients at this value')
