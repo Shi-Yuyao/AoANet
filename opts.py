@@ -3,15 +3,15 @@ import argparse
 def parse_opt():
     parser = argparse.ArgumentParser()
     # Data input settings
-    parser.add_argument('--input_json', type=str, default='data/coco.json',
+    parser.add_argument('--input_json', type=str, default='data/cocotalk.json',
                     help='path to the json file containing additional info and vocab')
-    parser.add_argument('--input_fc_dir', type=str, default='/data/cocotalk_fc',
+    parser.add_argument('--input_fc_dir', type=str, default='/data/scene_understanding/bottom-up-feature/adaptive/cocobu_fc',
                     help='path to the directory containing the preprocessed fc feats')
-    parser.add_argument('--input_att_dir', type=str, default='/data/cocotalk_att',
+    parser.add_argument('--input_att_dir', type=str, default='/data/scene_understanding/bottom-up-feature/adaptive/cocobu_att',
                     help='path to the directory containing the preprocessed att feats')
-    parser.add_argument('--input_box_dir', type=str, default='/data/cocotalk_box',
+    parser.add_argument('--input_box_dir', type=str, default='/data/scene_understanding/bottom-up-feature/adaptive/cocobu_box',
                     help='path to the directory containing the boxes of att feats')
-    parser.add_argument('--input_label_h5', type=str, default='data/coco_label.h5',
+    parser.add_argument('--input_label_h5', type=str, default='data/cocotalk_label.h5',
                     help='path to the h5file containing the preprocessed dataset')
     parser.add_argument('--start_from', type=str, default=None,
                     help="""continue training from saved model at this path. Path must contain files saved by previous training process: 
