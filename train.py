@@ -130,7 +130,7 @@ def train(opt):
             if epoch_done:
                 if not opt.noamopt and not opt.reduce_on_plateau:
                     # Assign the learning rate
-                    if epoch > opt.learning_rate_decay_start and opt.learning_rate_decay_start >= 0:
+                    if epoch > opt.learning_rate_decay_start and opt.learning_rate_decay_start >= 0:  # 在需要开启学习率降低的阶段降低学习率
                         frac = (epoch - opt.learning_rate_decay_start) // opt.learning_rate_decay_every
                         decay_factor = opt.learning_rate_decay_rate ** frac
                         opt.current_lr = opt.learning_rate * decay_factor
@@ -138,13 +138,13 @@ def train(opt):
                         opt.current_lr = opt.learning_rate
                     utils.set_lr(optimizer, opt.current_lr)  # set the decayed rate
                 # Assign the scheduled sampling prob
-                if epoch > opt.scheduled_sampling_start and opt.scheduled_sampling_start >= 0:
+                if epoch > opt.scheduled_sampling_start and opt.scheduled_sampling_start >= 0:  # 判断需要开启scheduled sampling的时机（训练技巧，混合gt与输出值）
                     frac = (epoch - opt.scheduled_sampling_start) // opt.scheduled_sampling_increase_every
                     opt.ss_prob = min(opt.scheduled_sampling_increase_prob * frac, opt.scheduled_sampling_max_prob)
                     model.ss_prob = opt.ss_prob
 
                 # If start self critical training
-                if opt.self_critical_after != -1 and epoch >= opt.self_critical_after:
+                if opt.self_critical_after != -1 and epoch >= opt.self_critical_after:  # 判断是否开启强化学习的scst
                     sc_flag = True
                     init_scorer(opt.cached_tokens)
                 else:
@@ -161,14 +161,14 @@ def train(opt):
             data = loader.get_batch('train')
             print('Read data:', time.time() - start)
 
-            if (iteration % acc_steps == 0):
+            if (iteration % acc_steps == 0):  # 每一个accumulation steps对梯度进行清零
                 optimizer.zero_grad()
 
-            torch.cuda.synchronize()
+            torch.cuda.synchronize()  # 精确计量时间时，等待GPU上的所有操作完成
             start = time.time()
             tmp = [data['fc_feats'], data['att_feats'], data['labels'], data['masks'], data['att_masks']]
             tmp = [_ if _ is None else _.cuda() for _ in tmp]
-            fc_feats, att_feats, labels, masks, att_masks = tmp
+            fc_feats, att_feats, labels, masks, att_masks = tmp  # 将这些输入全部转化到GPU
 
             model_out = dp_lw_model(fc_feats, att_feats, labels, masks, att_masks, data['gts'],
                                     torch.arange(0, len(data['gts'])), sc_flag)
