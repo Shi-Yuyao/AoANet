@@ -124,7 +124,7 @@ class AoA_Refiner_Core(nn.Module):
         layer = AoA_Refiner_Layer(opt.rnn_size, attn,
                                   PositionwiseFeedForward(opt.rnn_size, 2048, 0.1) if opt.use_ff else None, 0.1)
         self.layers = clones(layer, 6)  # 将Refiner_Layer克隆6次
-        self.norm = LayerNorm(layer.size)
+        self.norm = LayerNorm(layer.size)  # 建立layer normalization
 
     def forward(self, x, mask):
         for layer in self.layers:
@@ -142,6 +142,7 @@ class AoA_Decoder_Core(nn.Module):
         self.use_ctx_drop = getattr(opt, 'ctx_drop', 0)
         self.out_res = getattr(opt, 'out_res', 0)
         self.decoder_type = getattr(opt, 'decoder_type', 'AoA')
+        # 构建LSTMCell，input维度为512+512，hidden layer维度为512
         self.att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size, opt.rnn_size)  # we, fc, h^2_t-1
         self.out_drop = nn.Dropout(self.drop_prob_lm)
 

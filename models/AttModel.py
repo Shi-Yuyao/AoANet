@@ -71,7 +71,7 @@ class AttModel(CaptionModel):
 
         self.ss_prob = 0.0  # Schedule sampling probability
 
-        self.embed = nn.Sequential(nn.Embedding(self.vocab_size + 1, self.input_encoding_size),
+        self.embed = nn.Sequential(nn.Embedding(self.vocab_size + 1, self.input_encoding_size),  # 词嵌入层
                                    nn.ReLU(),
                                    nn.Dropout(self.drop_prob_lm))
         self.fc_embed = nn.Sequential(nn.Linear(self.fc_feat_size, self.rnn_size),
