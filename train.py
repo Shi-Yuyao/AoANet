@@ -90,7 +90,7 @@ def train(opt):
     dp_model = torch.nn.DataParallel(model)  # 将模型放在在多个GPU上并行（但好像没有传输device的参数）
     lw_model = LossWrapper(model, opt)
     dp_lw_model = torch.nn.DataParallel(lw_model)
-
+    print(dp_lw_model)  # 打印网络结构
     epoch_done = True
     # Assure in training mode
     dp_lw_model.train()
