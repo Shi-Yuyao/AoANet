@@ -31,15 +31,15 @@ class MultiHeadedDotAttention(nn.Module):
             self.norm = LayerNorm(d_model)
         else:
             self.norm = lambda x: x
-        self.linears = clones(nn.Linear(d_model, d_model * scale), 1 + 2 * project_k_v)
+        self.linears = clones(nn.Linear(d_model, d_model * scale), 1 + 2 * project_k_v)  # 将线性模型克隆1 + 2 * project_k_v倍
 
         # output linear layer after the multi-head attention?
         self.output_layer = nn.Linear(d_model * scale, d_model)
 
         # apply aoa after attention?
         self.use_aoa = do_aoa
-        if self.use_aoa:
-            self.aoa_layer = nn.Sequential(nn.Linear((1 + scale) * d_model, 2 * d_model), nn.GLU())
+        if self.use_aoa:  # 建立AoA层
+            self.aoa_layer = nn.Sequential(nn.Linear((1 + scale) * d_model, 2 * d_model), nn.GLU())  # aoa层的实现，fc之后再加GLU
             # dropout to the input of AoA layer
             if dropout_aoa > 0:
                 self.dropout_aoa = nn.Dropout(p=dropout_aoa)
@@ -98,6 +98,7 @@ class MultiHeadedDotAttention(nn.Module):
 
 
 class AoA_Refiner_Layer(nn.Module):
+    # size：feature维度；self_attn：多头注意力网络；feed_forward：位置前馈网络
     def __init__(self, size, self_attn, feed_forward, dropout):
         super(AoA_Refiner_Layer, self).__init__()
         self.self_attn = self_attn
@@ -105,22 +106,24 @@ class AoA_Refiner_Layer(nn.Module):
         self.use_ff = 0
         if self.feed_forward is not None:
             self.use_ff = 1
-        self.sublayer = clones(SublayerConnection(size, dropout), 1 + self.use_ff)
+        self.sublayer = clones(SublayerConnection(size, dropout), 1 + self.use_ff)  # 残差网络模块
         self.size = size
 
     def forward(self, x, mask):
-        x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))
-        return self.sublayer[-1](x, self.feed_forward) if self.use_ff else x
+        x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))  # 将KQV与mask通过多头注意力网络，再使用残差模块
+        return self.sublayer[-1](x, self.feed_forward) if self.use_ff else x  # 将上一步的输出与位置前馈网络使用残差模块连接
 
 
 class AoA_Refiner_Core(nn.Module):
     def __init__(self, opt):
         super(AoA_Refiner_Core, self).__init__()
+        # 建立多头注意力网络
         attn = MultiHeadedDotAttention(opt.num_heads, opt.rnn_size, project_k_v=1, scale=opt.multi_head_scale,
                                        do_aoa=opt.refine_aoa, norm_q=0, dropout_aoa=getattr(opt, 'dropout_aoa', 0.3))
+        # 建立Refiner_Layer
         layer = AoA_Refiner_Layer(opt.rnn_size, attn,
                                   PositionwiseFeedForward(opt.rnn_size, 2048, 0.1) if opt.use_ff else None, 0.1)
-        self.layers = clones(layer, 6)
+        self.layers = clones(layer, 6)  # 将Refiner_Layer克隆6次
         self.norm = LayerNorm(layer.size)
 
     def forward(self, x, mask):
@@ -204,7 +207,7 @@ class AoAModel(AttModel):
         self.use_mean_feats = getattr(opt, 'mean_feats', 1)
         if opt.use_multi_head == 2:
             del self.ctx2att
-            self.ctx2att = nn.Linear(opt.rnn_size, 2 * opt.multi_head_scale * opt.rnn_size)
+            self.ctx2att = nn.Linear(opt.rnn_size, 2 * opt.multi_head_scale * opt.rnn_size)  # 新建ctx2att网络
 
         if self.use_mean_feats:
             del self.fc_embed
