@@ -25,13 +25,20 @@ from models.TransformerModel import LayerNorm, attention, clones, SublayerConnec
 
 
 class MultiHeadedDotAttention(nn.Module):
-    def __init__(self, h, d_model, dropout=0.1, scale=1,
+    def __init__(self,
+                 h,
+                 d_model,
+                 dropout=0.1,
+                 scale=1,
                  project_k_v=1,
                  use_output_layer=1,
-                 do_aoa=0, norm_q=0,
+                 do_aoa=0,
+                 norm_q=0,
                  dropout_aoa=0.3):
         super(MultiHeadedDotAttention, self).__init__()
+
         assert d_model * scale % h == 0
+
         # We assume d_v always equals d_k
         self.d_k = d_model * scale // h
         self.h = h
@@ -89,9 +96,8 @@ class MultiHeadedDotAttention(nn.Module):
             key_ = key.view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
             value_ = value.view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
         else:
-            query_, key_, value_ = \
-                [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
-                 for l, x in zip(self.linears, (query, key, value))]
+            query_, key_, value_ = [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+                                    for l, x in zip(self.linears, (query, key, value))]
 
         # Apply attention on all the projected vectors in batch.
         x, self.attn = attention(query_, key_, value_, mask=mask, dropout=self.dropout)
@@ -131,11 +137,19 @@ class AoA_Refiner_Core(nn.Module):
     def __init__(self, opt):
         super(AoA_Refiner_Core, self).__init__()
         # 建立多头注意力网络
-        attn = MultiHeadedDotAttention(opt.num_heads, opt.rnn_size, project_k_v=1, scale=opt.multi_head_scale,
-                                       do_aoa=opt.refine_aoa, norm_q=0, dropout_aoa=getattr(opt, 'dropout_aoa', 0.3))
+        attn = MultiHeadedDotAttention(opt.num_heads,
+                                       opt.rnn_size,
+                                       project_k_v=1,
+                                       scale=opt.multi_head_scale,
+                                       do_aoa=opt.refine_aoa,
+                                       norm_q=0,
+                                       dropout_aoa=getattr(opt, 'dropout_aoa', 0.3))
+
         # 建立Refiner_Layer,前馈网络就是fc,输出就是2048
         layer = AoA_Refiner_Layer(opt.rnn_size, attn,
-                                  PositionwiseFeedForward(opt.rnn_size, 2048, 0.1) if opt.use_ff else None, 0.1)
+                                  PositionwiseFeedForward(opt.rnn_size, 2048, 0.1)
+                                  if opt.use_ff else None, 0.1)
+
         self.layers = clones(layer, 6)  # 将Refiner_Layer克隆6次
         self.norm = LayerNorm(layer.size)  # 建立layer normalization
 
@@ -155,6 +169,7 @@ class AoA_Decoder_Core(nn.Module):
         self.use_ctx_drop = getattr(opt, 'ctx_drop', 0)
         self.out_res = getattr(opt, 'out_res', 0)
         self.decoder_type = getattr(opt, 'decoder_type', 'AoA')
+
         # 构建LSTMCell，input维度为512+512，hidden layer维度为512
         self.att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size, opt.rnn_size)  # we, fc, h^2_t-1
         self.out_drop = nn.Dropout(self.drop_prob_lm)
@@ -167,6 +182,9 @@ class AoA_Decoder_Core(nn.Module):
             # AoA layer
             self.att2ctx = nn.Sequential(
                 nn.Linear(self.d_model * opt.multi_head_scale + opt.rnn_size, 2 * opt.rnn_size), nn.GLU())
+        elif self.decoder_type == 'VAEAoA':
+            self.att2ctx = nn.Sequential(
+                nn.Linear(self.d_model * opt.multi_head_scale + opt.rnn_size, 2 * opt.rnn_size), nn.GLU())
         elif self.decoder_type == 'LSTM':
             # LSTM layer
             self.att2ctx = nn.LSTMCell(self.d_model * opt.multi_head_scale + opt.rnn_size, opt.rnn_size)
@@ -175,11 +193,10 @@ class AoA_Decoder_Core(nn.Module):
             self.att2ctx = nn.Sequential(nn.Linear(self.d_model * opt.multi_head_scale + opt.rnn_size, opt.rnn_size),
                                          nn.ReLU())
 
-        # if opt.use_multi_head == 1: # TODO, not implemented for now
-        #     self.attention = MultiHeadedAddAttention(opt.num_heads, opt.d_model, scale=opt.multi_head_scale)
         if opt.use_multi_head == 2:
             self.attention = MultiHeadedDotAttention(opt.num_heads, opt.rnn_size, project_k_v=0,
-                                                     scale=opt.multi_head_scale, use_output_layer=0, do_aoa=0, norm_q=1)
+                                                     scale=opt.multi_head_scale,
+                                                     use_output_layer=0, do_aoa=0, norm_q=1)
         else:
             self.attention = Attention(opt)
 
@@ -249,7 +266,7 @@ class VAEAoAModel(AttModel):
         self.use_mean_feats = getattr(opt, 'mean_feats', 1)
         if opt.use_multi_head == 2:
             del self.ctx2att
-            self.ctx2att = nn.Linear(opt.rnn_size, 2 * opt.multi_head_scale * opt.rnn_size)  # 新建ctx2att网络
+            self.ctx2att = nn.Linear(opt.rnn_size, 2 * opt.multi_head_scale * opt.rnn_size)
 
         if self.use_mean_feats:
             del self.fc_embed
