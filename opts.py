@@ -24,8 +24,8 @@ def parse_opt():
                     help='Cached token file for calculating cider score during self critical training.')
 
     # Model settings
-    parser.add_argument('--caption_model', type=str, default="aoa",
-                    help='show_tell, show_attend_tell, all_img, fc, att2in, att2in2, att2all2, adaatt, adaattmo, topdown, stackatt, denseatt, transformer')
+    parser.add_argument('--caption_model', type=str, default="vaeaoa",
+                    help='show_tell, show_attend_tell, all_img, fc, att2in, att2in2, att2all2, adaatt, adaattmo, topdown, stackatt, denseatt, transformer,vaeaoa')
     parser.add_argument('--rnn_size', type=int, default=512,
                     help='size of the rnn in number of hidden nodes in each layer')
     parser.add_argument('--num_layers', type=int, default=1,
@@ -61,8 +61,8 @@ def parse_opt():
 
     parser.add_argument('--ctx_drop', type=int, default=0,
                     help='apply dropout to the context vector before fed into LSTM?')
-    parser.add_argument('--decoder_type', type=str, default='AoA',
-                    help='AoA, LSTM, base')
+    parser.add_argument('--decoder_type', type=str, default='VAEAoA',
+                    help='AoA, LSTM, base,VAEAoA')
     parser.add_argument('--use_multi_head', type=int, default=2,
                     help='use multi head attention? 0 for addictive single head; 1 for addictive multi head; 2 for productive multi head.')
     parser.add_argument('--num_heads', type=int, default=8,
