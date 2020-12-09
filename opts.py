@@ -42,8 +42,8 @@ def parse_opt():
                     help='2048 for resnet, 512 for vgg')
     parser.add_argument('--logit_layers', type=int, default=1,
                     help='number of layers in the RNN')
-
-
+    parser.add_argument('--latent_space_size', type=int, default=512,
+                        help='number of latent_space_size')
     parser.add_argument('--use_bn', type=int, default=0,
                     help='If 1, then do batch_normalization first in att_embed, if 2 then do bn both in the beginning and the end of att_embed')
 
@@ -74,7 +74,7 @@ def parse_opt():
                     help='warm up the learing rate?')
     parser.add_argument('--acc_steps', type=int, default=1,
                     help='accumulation steps')
-    
+
 
     # feature manipulation
     parser.add_argument('--norm_att_feat', type=int, default=0,
@@ -115,11 +115,11 @@ def parse_opt():
                     help='what update to use? rmsprop|sgd|sgdmom|adagrad|adam')
     parser.add_argument('--learning_rate', type=float, default=4e-4,
                     help='learning rate')
-    parser.add_argument('--learning_rate_decay_start', type=int, default=-1, 
+    parser.add_argument('--learning_rate_decay_start', type=int, default=-1,
                     help='at what iteration to start decaying learning rate? (-1 = dont) (in epoch)')
-    parser.add_argument('--learning_rate_decay_every', type=int, default=3, 
+    parser.add_argument('--learning_rate_decay_every', type=int, default=3,
                     help='every how many iterations thereafter to drop LR?(in epoch)')
-    parser.add_argument('--learning_rate_decay_rate', type=float, default=0.8, 
+    parser.add_argument('--learning_rate_decay_rate', type=float, default=0.8,
                     help='every how many iterations thereafter to drop LR?(in epoch)')
     parser.add_argument('--optim_alpha', type=float, default=0.9,
                     help='alpha for adam')
@@ -141,13 +141,13 @@ def parse_opt():
     parser.add_argument('--reduce_on_plateau', action='store_true',
                     help='')
 
-    parser.add_argument('--scheduled_sampling_start', type=int, default=-1, 
+    parser.add_argument('--scheduled_sampling_start', type=int, default=-1,
                     help='at what iteration to start decay gt probability')
-    parser.add_argument('--scheduled_sampling_increase_every', type=int, default=5, 
+    parser.add_argument('--scheduled_sampling_increase_every', type=int, default=5,
                     help='every how many iterations thereafter to gt probability')
-    parser.add_argument('--scheduled_sampling_increase_prob', type=float, default=0.05, 
+    parser.add_argument('--scheduled_sampling_increase_prob', type=float, default=0.05,
                     help='How much to update the prob')
-    parser.add_argument('--scheduled_sampling_max_prob', type=float, default=0.25, 
+    parser.add_argument('--scheduled_sampling_max_prob', type=float, default=0.25,
                     help='Maximum scheduled sampling prob.')
 
 
@@ -163,9 +163,9 @@ def parse_opt():
     parser.add_argument('--language_eval', type=int, default=0,
                     help='Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
     parser.add_argument('--losses_log_every', type=int, default=25,
-                    help='How often do we snapshot losses, for inclusion in the progress dump? (0 = disable)')       
+                    help='How often do we snapshot losses, for inclusion in the progress dump? (0 = disable)')
     parser.add_argument('--load_best_score', type=int, default=1,
-                    help='Do we load previous best score when resuming training.')       
+                    help='Do we load previous best score when resuming training.')
 
     # misc
     parser.add_argument('--id', type=str, default='',
@@ -235,9 +235,9 @@ def add_eval_options(parser):
     parser.add_argument('--remove_bad_endings', type=int, default=0,
                     help='Remove bad endings')
     # For evaluation on a folder of images:
-    parser.add_argument('--image_folder', type=str, default='', 
+    parser.add_argument('--image_folder', type=str, default='',
                     help='If this is nonempty then will predict on the images in this folder path')
-    parser.add_argument('--image_root', type=str, default='', 
+    parser.add_argument('--image_root', type=str, default='',
                     help='In case the image paths have to be preprended with a root path to an image folder')
     # For evaluation on MSCOCO images from some split:
     parser.add_argument('--input_fc_dir', type=str, default='',
@@ -248,16 +248,16 @@ def add_eval_options(parser):
                     help='path to the h5file containing the preprocessed dataset')
     parser.add_argument('--input_label_h5', type=str, default='',
                     help='path to the h5file containing the preprocessed dataset')
-    parser.add_argument('--input_json', type=str, default='', 
+    parser.add_argument('--input_json', type=str, default='',
                     help='path to the json file containing additional info and vocab. empty = fetch from model checkpoint.')
-    parser.add_argument('--split', type=str, default='test', 
+    parser.add_argument('--split', type=str, default='test',
                     help='if running on MSCOCO images, which split to use: val|test|train')
-    parser.add_argument('--coco_json', type=str, default='', 
+    parser.add_argument('--coco_json', type=str, default='',
                     help='if nonempty then use this file in DataLoaderRaw (see docs there). Used only in MSCOCO test evaluation, where we have a specific json file of only test set images.')
     # misc
-    parser.add_argument('--id', type=str, default='', 
+    parser.add_argument('--id', type=str, default='',
                     help='an id identifying this run/job. used only if language_eval = 1 for appending to intermediate files')
-    parser.add_argument('--verbose_beam', type=int, default=1, 
+    parser.add_argument('--verbose_beam', type=int, default=1,
                     help='if we need to print out all beam search beams.')
-    parser.add_argument('--verbose_loss', type=int, default=0, 
+    parser.add_argument('--verbose_loss', type=int, default=0,
                     help='If calculate loss using ground truth during evaluation')
