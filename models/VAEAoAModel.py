@@ -20,6 +20,7 @@ import torch.nn as nn
 from models.AttModel import pack_wrapper, AttModel, Attention
 from models.TransformerModel import LayerNorm, attention, clones, SublayerConnection, \
     PositionwiseFeedForward, PositionalEncoding, Embeddings
+import torch.nn.functional as F
 
 
 class MultiHeadedDotAttention(nn.Module):
@@ -160,14 +161,30 @@ class VAE_AoA_Refiner_Core(nn.Module):
 
 
 class VAE_AoA_Encoder_Core(nn.Module):
-    def __init__(self, opt, size):
+    '''
+        # 1.生成一个self Multi-head attention模块，对seq GT做自编码，同时生成
+            input: seq GT [batch_size,seq_len,d_model] eg.[5,16,512]
+            output: ctx vector ci [5,16,512]
+        # 2.生成一个带AoA的self Multi-head attention模块，为ctx vector嵌入图像信息，同时生成
+            input: ctx vector ci ; image feature A'
+            output: new ctx vector new_ci
+        # 3.建立一个MLP网络，对 new_ci 进行编码，生成一个latent state；
+            再建立两个fc，从latent state中生成均值与方差；
+            在均值与方差重采样，为decoder生成该时刻的latent sample，时序生成
+            input: new_ci ; latent sample z_i-1
+            output: mu_i ; logvar_i ; z_i
+    '''
+
+    def __init__(self, opt):
         super(VAE_AoA_Encoder_Core, self).__init__()
-        # 初始化
-        # 1.生成一个self Multi-head attention模块，以seq GT为输入
-        # 2.生成一个带AoA的self Multi-head attention模块，以每一个ctx向量与image feature为输入
-        # 3.建立一个MLP网络，以新的ctx向量与上一时刻生成的latent space z(t-1)为输入
+        self.latent_space_size = opt.latent_space_size
+        self.use_ff = 1
+        self.feed_forward = PositionwiseFeedForward(opt.rnn_size, 2048, 0.1)
         self.dropout = 0.1
-        self.embed_layer = Embeddings(d_model=512, vocab=opt.vocab_size)
+        self.embed_layer = nn.Sequential(Embeddings(d_model=512, vocab=opt.vocab_size + 1),
+                                         # vocab_size+1为9488，即增加<END>
+                                         nn.ReLU(),
+                                         nn.Dropout(0.5))
         self.position_encoding_layer = PositionalEncoding(d_model=512, dropout=0.1, max_len=opt.seq_length)
         self.attn1 = MultiHeadedDotAttention(h=8,
                                              d_model=512,
@@ -179,46 +196,68 @@ class VAE_AoA_Encoder_Core(nn.Module):
                                              d_model=512,
                                              do_aoa=1,
                                              norm_q=0)
-        self.sublayer = clones(SublayerConnection(size, self.dropout), 1 + self.use_ff)
+        self.sublayer = clones(SublayerConnection(512, self.dropout), 1 + self.use_ff)
 
-    def forward(self, refined_att_feats, seq_GT, latent_space_prior, mask=None):
-        # 网络传输过程：
-        # 1.将Seq GT通过self Multi-head attention，生成m个ctx向量，称为c(i)
-        # 2.将每一个ctx向量分别与image feature做Multi-head attention，生成对应的分值，称为a(i)
-        # 3.将a与ctx通过AoA模块，做一次attention on attention，生成新的ctx向量，称为new_c(i)
-        # 4.将新的ctx向量与上一时刻生成的latent space z(t-1)通过一个MLP，生成均值与方差z(t)
-        embedd_seq_GT = self.embed_layer(seq_GT)
-        position = self.position_encoding_layer(seq_GT)
-        x = embedd_seq_GT + position
-        x = self.sublayer[0](x, lambda x: self.attn1(x, x, x, mask))
-        x = self.sublayer[-1](x, self.feed_forward) if self.use_ff else x
-        att = self.attn2(x,
-                         refined_att_feats.narrow(2, 0, self.multi_head_scale * self.d_model),
-                         refined_att_feats.narrow(2, self.multi_head_scale * self.d_model,
-                                                  self.multi_head_scale * self.d_model), mask)
-
-        return att
-
-
-class Latent_Space_Core(nn.Module):
-    def __init__(self, opt):
-        super(Latent_Space_Core, self).__init__()
-        self.MLP_layer = nn.Sequential(nn.Linear(1024, 1024), nn.Linear(1024, 2))
+        self.MLP_layer = nn.Sequential(nn.Linear(1024, 1024), nn.LayerNorm(1024), nn.LeakyReLU())
+        self.MLP_layer_mu = nn.Linear(1024, self.latent_space_size)
+        self.MLP_layer_logvar = nn.Linear(1024, self.latent_space_size)
 
     def reparameterize(self, mu, log_var):
         std = torch.exp(log_var / 2)
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, att_feats_seq, latent_sample_prior):
-        x = torch.cat((att_feats_seq + latent_sample_prior), dim=1)
-        mu, logvar = self.MLP_layer(x)
-        return self.reparameterize(mu, logvar), mu, logvar
+    def forward(self, refined_att_feats, seq_GT, mask=None):
+        # 网络传输过程：
+        # 1.将Seq GT通过self Multi-head attention，生成m个ctx向量，称为c(i)
+        # 2.将每一个ctx向量分别与image feature做Multi-head attention，生成对应的分值，称为hat_a(i)
+        # 3.将hat_a(i)与c(i)通过AoA模块，做一次attention on attention，生成新的ctx向量，称为new_c(i)
+        # 4.将新的ctx向量new_c(i)与上一时刻生成的latent sample z(i-1)通过一个MLP，生成均值与方差z(i)
+        embedd_seq_GT = self.embed_layer(seq_GT)
+        x = self.position_encoding_layer(embedd_seq_GT)
+        c = self.sublayer[0](x, lambda x: self.attn1(x, x, x, mask))  # 对seq_GT做self Multi-head attention
+        c = self.sublayer[-1](c, self.feed_forward) if self.use_ff else c
+        new_c = []
+        for i in range(c.size(1)):
+            c_i = c[:, i, :]
+            new_c_i = self.attn2(c_i,
+                                 refined_att_feats.narrow(2, 0, 512),
+                                 refined_att_feats.narrow(2, 512, 512), mask)
+            new_c.append(new_c_i)
+        latent_sample_prior = torch.randn(new_c[0].size(0), new_c[0].size(1)).cuda()
+        # 1save mu,2save log_var; batch_size; seq_len; latent dim
+        latent_space = torch.zeros(2, seq_GT.size(0), seq_GT.size(1), self.latent_space_size).cuda()
+        latent_sample = list()
+        for index, j in enumerate(new_c):
+            mlp_input = torch.cat((j, latent_sample_prior), dim=1)
+            mlp_output = self.MLP_layer(mlp_input)
+            mu = self.MLP_layer_mu(mlp_output)
+            log_var = self.MLP_layer_logvar(mlp_output)
+            latent_space[0, :, index] = mu
+            latent_space[1, :, index] = log_var
+            latent_sample_prior = self.reparameterize(mu, log_var)
+            latent_sample.append(latent_sample_prior)
+        latent_sample.append(torch.randn(new_c[0].size(0), new_c[0].size(1)).cuda())
+
+        return latent_space, latent_sample
 
 
 class VAE_AoA_Decoder_Core(nn.Module):
+    '''
+           # 1.生成一个LSTM模块，对输入的信息做编码，时序生成
+               input: mean_feats+c_i-1 [5,512] ; z_i [5,512]; x_i [5,512]
+               output: h_i [5,512]
+           # 2.生成一个self Multi-head attention模块，h_i再与image features做一次attention，时序生成
+               input: h_i [5,512] ; image feature A' [batch_size,object_nums,1024]
+               output: attentioned vector att_i [5,512]
+           # 3.建立一个AoA网络，为decoder生成该时刻的ctx vector，时序生成
+               input: cat[att_i,h_i] [5,1024]
+               output: c_i [5,9488]
+       '''
+
     def __init__(self, opt):
         super(VAE_AoA_Decoder_Core, self).__init__()
+        self.latent_space_size = opt.latent_space_size
         self.drop_prob_lm = opt.drop_prob_lm
         self.d_model = opt.rnn_size
         self.use_multi_head = opt.use_multi_head
@@ -227,9 +266,10 @@ class VAE_AoA_Decoder_Core(nn.Module):
         self.out_res = getattr(opt, 'out_res', 0)
         self.decoder_type = getattr(opt, 'decoder_type', 'AoA')
 
-        # 构建LSTMCell，input维度为512(word embedding)+512(Image features)+512(latent space)，hidden layer维度为512
-        self.att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size + opt.latent_space_size,
-                                    opt.rnn_size)  # we, fc, h^2_t-1
+        # 构建LSTMCell，input维度为512(word embedding)+512(Image features)+512(latent sample)，hidden layer维度为512
+        self.att_lstm = nn.LSTMCell(opt.input_encoding_size +
+                                    opt.rnn_size +
+                                    opt.latent_space_size, opt.rnn_size)  # we, fc, h^2_t-1
         self.out_drop = nn.Dropout(self.drop_prob_lm)
 
         if self.decoder_type == 'AoA':
@@ -260,14 +300,14 @@ class VAE_AoA_Decoder_Core(nn.Module):
         else:
             self.ctx_drop = lambda x: x
 
-    def forward(self, xt, mean_feats, att_feats, p_att_feats, state, att_masks=None):
+    def forward(self, xt, zt, mean_feats, att_feats, p_att_feats, state, att_masks=None):
         # 1. 输入image features mean+latent sample current+word embedding current生成ht
         # 2. 将ht与image features attn共同输入multi-head attn得到hat a
         # 3. 将ht与hat a输入AoA模块生成ctx vector current
         # 4. 将ctx vector current通过linear+softmax作为output current，计算交叉熵Loss
 
         # state[0][1] is the context vector at the last step
-        h_att, c_att = self.att_lstm(torch.cat([xt, mean_feats + self.ctx_drop(state[0][1])], 1),
+        h_att, c_att = self.att_lstm(torch.cat([xt, zt, mean_feats + self.ctx_drop(state[0][1])], 1),
                                      (state[0][0], state[1][0]))
 
         if self.use_multi_head == 2:
@@ -299,89 +339,70 @@ class VAE_AoA_Decoder_Core(nn.Module):
 
 
 class VAE_AoA_Black_Core(nn.Module):
+    '''
+        # 1.生成一个LSTM模块，对输入的信息做编码，时序生成
+            input: mean_feats [5,512] ; z_i-1 [5,512] ; x_i-1 [5,512]
+            output: h_i [5,512]
+        # 2.生成一个MLP模块，对 LSTM 的 h_i 进行变换，生成一个latent state，时序生成
+            input: h_i [5,512] ;
+            output: latent state vector hidden_i [5,512]
+        # 3.建立两个fc，从latent state中生成均值与方差，时序生成
+            input: hidden_i [5,512]
+            output: mu_i [5,512] ; logvar [5,512]
+        # 4.对均值与方差重采样，为decoder/blackbox生成该时刻的latent sample，时序生成
+            input: mu_i [5,512] ; logvar [5,512]
+            output: z_i [5,512]
+       '''
+
     def __init__(self, opt):
         super(VAE_AoA_Black_Core, self).__init__()
+        self.latent_space_size = opt.latent_space_size
         self.drop_prob_lm = opt.drop_prob_lm
         self.d_model = opt.rnn_size
-        self.use_multi_head = opt.use_multi_head
-        self.multi_head_scale = opt.multi_head_scale
         self.use_ctx_drop = getattr(opt, 'ctx_drop', 0)
         self.out_res = getattr(opt, 'out_res', 0)
-        self.decoder_type = getattr(opt, 'decoder_type', 'AoA')
 
-        # 构建LSTMCell，input维度为512(word embedding)+512(Image features)+512(latent space)，hidden layer维度为512
-        self.att_lstm = nn.LSTMCell(opt.input_encoding_size + opt.rnn_size + opt.latent_space_size,
-                                    opt.rnn_size)  # we, fc, h^2_t-1
+        self.MLP_layer = nn.Sequential(nn.Linear(512, 512), nn.LayerNorm(512), nn.LeakyReLU())
+        self.MLP_layer_mu = nn.Linear(512, self.latent_space_size)
+        self.MLP_layer_logvar = nn.Linear(512, self.latent_space_size)
+
+        # 构建LSTMCell，input维度为512(word prior)+512(Image features)+512(latent sample_prior)，hidden layer维度为512
+        self.att_lstm = nn.LSTMCell(opt.input_encoding_size +
+                                    opt.rnn_size +
+                                    opt.latent_space_size, opt.rnn_size)  # we, fc, h^2_t-1
         self.out_drop = nn.Dropout(self.drop_prob_lm)
-
-        if self.decoder_type == 'AoA':
-            # AoA layer
-            self.att2ctx = nn.Sequential(
-                nn.Linear(self.d_model * opt.multi_head_scale + opt.rnn_size, 2 * opt.rnn_size), nn.GLU())
-        elif self.decoder_type == 'VAEAoA':
-            # VAE AoA layer
-            self.att2ctx = nn.Sequential(
-                nn.Linear(self.d_model * opt.multi_head_scale + opt.rnn_size, 2 * opt.rnn_size), nn.GLU())
-        elif self.decoder_type == 'LSTM':
-            # LSTM layer
-            self.att2ctx = nn.LSTMCell(self.d_model * opt.multi_head_scale + opt.rnn_size, opt.rnn_size)
-        else:
-            # Base linear layer
-            self.att2ctx = nn.Sequential(nn.Linear(self.d_model * opt.multi_head_scale + opt.rnn_size, opt.rnn_size),
-                                         nn.ReLU())
-
-        if opt.use_multi_head == 2:
-            self.attention = MultiHeadedDotAttention(opt.num_heads, opt.rnn_size, project_k_v=0,
-                                                     scale=opt.multi_head_scale,
-                                                     use_output_layer=0, do_aoa=0, norm_q=1)
-        else:
-            self.attention = Attention(opt)
 
         if self.use_ctx_drop:
             self.ctx_drop = nn.Dropout(self.drop_prob_lm)
         else:
             self.ctx_drop = lambda x: x
 
-    def forward(self, xt, mean_feats, att_feats, p_att_feats, state, att_masks=None):
-        # 1. 输入image features mean+latent sample prior+word embedding prior生成ht
-        # 2. 将ht通过MLP生成均值与方差z_black(t)，z_black(t)将作为下一时刻的black core的输入
+    def reparameterize(self, mu, log_var):
+        std = torch.exp(log_var / 2)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def forward(self, x_prior, mean_feats, z_prior, state):
+        # 1. 输入image features mean+latent sample prior+word prior生成ht
+        # 2. 将ht通过MLP生成均值与方差z_black(i)，z_black(t)将作为下一时刻的black core的输入
         # 3. 输出生成均值与方差，将与Latent_Space_Core的均值与方差做KL Loss
 
         # state[0][1] is the context vector at the last step
-        h_att, c_att = self.att_lstm(torch.cat([xt, mean_feats + self.ctx_drop(state[0][1])], 1),
-                                     (state[0][0], state[1][0]))
+        h, c = self.att_lstm(torch.cat([x_prior, z_prior, mean_feats], 1),
+                             (state[0][0], state[1][0]))
 
-        if self.use_multi_head == 2:
-            att = self.attention(h_att,
-                                 p_att_feats.narrow(2, 0, self.multi_head_scale * self.d_model),
-                                 # 取第二维的值，从multi_head_scale * d_model开始，到multi_head_scale * d_model结束
-                                 p_att_feats.narrow(2,
-                                                    self.multi_head_scale * self.d_model,
-                                                    self.multi_head_scale * self.d_model),
-                                 att_masks)
-        else:
-            att = self.attention(h_att, att_feats, p_att_feats, att_masks)
-
-        ctx_input = torch.cat([att, h_att], 1)
-        if self.decoder_type == 'LSTM':
-            output, c_logic = self.att2ctx(ctx_input, (state[0][1], state[1][1]))
-            state = (torch.stack((h_att, output)), torch.stack((c_att, c_logic)))
-        else:
-            output = self.att2ctx(ctx_input)
-            # save the context vector to state[0][1]
-            state = (torch.stack((h_att, output)), torch.stack((c_att, state[1][1])))
-
-        if self.out_res:
-            # add residual connection
-            output = output + h_att
-
-        output = self.out_drop(output)
-        return output, state
+        mlp_output = self.MLP_layer(h)
+        mu = self.MLP_layer_mu(mlp_output)
+        log_var = self.MLP_layer_logvar(mlp_output)
+        zt = self.reparameterize(mu, log_var)
+        state = (torch.stack((h, state[1][1])), torch.stack((c, state[1][1])))
+        return zt, mu, log_var, state
 
 
 class VAEAoAModel(AttModel):
     def __init__(self, opt):
         super(VAEAoAModel, self).__init__(opt)
+        self.latent_space_size = opt.latent_space_size
         self.num_layers = 2
         # mean pooling
         self.use_mean_feats = getattr(opt, 'mean_feats', 1)
@@ -395,6 +416,8 @@ class VAEAoAModel(AttModel):
             self.refiner = VAE_AoA_Refiner_Core(opt)
         else:
             self.refiner = lambda x, y: x
+        self.encoder = VAE_AoA_Encoder_Core(opt)
+        # self.blackbox = VAE_AoA_Black_Core(opt)
         self.core = VAE_AoA_Decoder_Core(opt)
 
     def _prepare_feature(self, fc_feats, att_feats, att_masks):
@@ -417,3 +440,72 @@ class VAEAoAModel(AttModel):
         p_att_feats = self.ctx2att(att_feats)
 
         return mean_feats, att_feats, p_att_feats, att_masks
+
+    def _forward(self, fc_feats, att_feats, seq, att_masks=None):
+        batch_size = fc_feats.size(0)
+        state_decoder = self.init_hidden(batch_size)
+        state_blackbox = self.init_hidden(batch_size)
+
+        outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size + 1)
+
+        # Prepare the features
+        p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
+        # pp_att_feats is used for attention, we cache it in advance to reduce computation cost
+        latent_space_encoder, latent_space_sample_encoder = self.encoder(pp_att_feats, seq[:, 1:-1])
+        z_blackbox_init = torch.randn(batch_size, self.latent_space_size).cuda()
+        for i in range(seq.size(1) - 1):
+            if self.training and i >= 1 and self.ss_prob > 0.0:  # otherwiste no need to sample
+                sample_prob = fc_feats.new(batch_size).uniform_(0, 1)
+                sample_mask = sample_prob < self.ss_prob
+                if sample_mask.sum() == 0:
+                    it = seq[:, i].clone()
+                else:
+                    sample_ind = sample_mask.nonzero().view(-1)
+                    it = seq[:, i].data.clone()
+                    # prob_prev = torch.exp(outputs[-1].data.index_select(0, sample_ind)) # fetch prev distribution: shape Nx(M+1)
+                    # it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1))
+                    # prob_prev = torch.exp(outputs[-1].data) # fetch prev distribution: shape Nx(M+1)
+                    prob_prev = torch.exp(outputs[:, i - 1].detach())  # fetch prev distribution: shape Nx(M+1)
+                    it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1).index_select(0, sample_ind))
+            else:
+                it = seq[:, i].clone()
+            # break if all the sequences end
+            if i >= 1 and seq[:, i].sum() == 0:
+                break
+            # 'it' contains a word index
+            xt = self.embed(it)
+            zt = latent_space_sample_encoder[i]
+            decoder_x_prior = list()
+            output, state_decoder, x_prior = self._get_logprobs_state(xt, zt,
+                                                                      p_fc_feats, p_att_feats, pp_att_feats,
+                                                                      p_att_masks, state_decoder)
+            outputs[:, i] = output
+            decoder_x_prior.append(x_prior)
+
+            latent_sample_blackbox = list()
+            latent_space_blackbox = torch.zeros(2, batch_size, seq.size(1) - 2, self.latent_space_size).cuda()
+            if i == 0:
+                zt_blackbox, mu_blackbox, log_var_blackbox, state_blackbox = self.blackbox(it,
+                                                                                           p_fc_feats,
+                                                                                           z_blackbox_init,
+                                                                                           state_blackbox)
+                latent_space_blackbox[0, :, i] = mu_blackbox
+                latent_space_blackbox[1, :, i] = log_var_blackbox
+                latent_sample_blackbox.append(zt_blackbox)
+            else:
+                zt_blackbox, mu_blackbox, log_var_blackbox, state_blackbox = self.blackbox(decoder_x_prior[-1],
+                                                                                           p_fc_feats,
+                                                                                           latent_sample_blackbox[-1],
+                                                                                           state_blackbox)
+                latent_space_blackbox[0, :, i] = mu_blackbox
+                latent_space_blackbox[1, :, i] = log_var_blackbox
+                latent_sample_blackbox.append(zt_blackbox)
+
+        return [outputs, latent_space_encoder]
+
+    def _get_logprobs_state(self, xt, zt, fc_feats, att_feats, p_att_feats, att_masks, state):
+
+        output, state = self.core(xt, zt, fc_feats, att_feats, p_att_feats, state, att_masks)
+        logprobs = F.log_softmax(self.logit(output), dim=1)
+
+        return logprobs, state, output
