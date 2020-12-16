@@ -120,7 +120,7 @@ class AoA_Refiner_Core(nn.Module):
         # 建立多头注意力网络
         attn = MultiHeadedDotAttention(opt.num_heads, opt.rnn_size, project_k_v=1, scale=opt.multi_head_scale,
                                        do_aoa=opt.refine_aoa, norm_q=0, dropout_aoa=getattr(opt, 'dropout_aoa', 0.3))
-        # 建立Refiner_Layer
+        # 建立Refiner_Layer,前馈网络就是fc,输出就是2048
         layer = AoA_Refiner_Layer(opt.rnn_size, attn,
                                   PositionwiseFeedForward(opt.rnn_size, 2048, 0.1) if opt.use_ff else None, 0.1)
         self.layers = clones(layer, 6)  # 将Refiner_Layer克隆6次
@@ -177,9 +177,13 @@ class AoA_Decoder_Core(nn.Module):
                                      (state[0][0], state[1][0]))
 
         if self.use_multi_head == 2:
-            att = self.attention(h_att, p_att_feats.narrow(2, 0, self.multi_head_scale * self.d_model),
-                                 p_att_feats.narrow(2, self.multi_head_scale * self.d_model,
-                                                    self.multi_head_scale * self.d_model), att_masks)
+            att = self.attention(h_att,
+                                 p_att_feats.narrow(2, 0, self.multi_head_scale * self.d_model),
+                                 # 取第二维的值，从multi_head_scale * d_model开始，到multi_head_scale * d_model结束
+                                 p_att_feats.narrow(2,
+                                                    self.multi_head_scale * self.d_model,
+                                                    self.multi_head_scale * self.d_model),
+                                 att_masks)
         else:
             att = self.attention(h_att, att_feats, p_att_feats, att_masks)
 
@@ -188,7 +192,7 @@ class AoA_Decoder_Core(nn.Module):
             output, c_logic = self.att2ctx(ctx_input, (state[0][1], state[1][1]))
             state = (torch.stack((h_att, output)), torch.stack((c_att, c_logic)))
         else:
-            output = self.att2ctx(ctx_input)
+            output = self.att2ctx(ctx_input) # 生成的就是ctx vector
             # save the context vector to state[0][1]
             state = (torch.stack((h_att, output)), torch.stack((c_att, state[1][1])))
 
