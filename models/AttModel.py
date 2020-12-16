@@ -90,8 +90,8 @@ class AttModel(CaptionModel):
         else:
             self.logit = [[nn.Linear(self.rnn_size, self.rnn_size), nn.ReLU(), nn.Dropout(0.5)] for _ in
                           range(opt.logit_layers - 1)]
-            self.logit = nn.Sequential(
-                *(reduce(lambda x, y: x + y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
+            # self.logit = nn.Sequential(
+            #     *(reduce(lambda x, y: x + y, self.logit) + [nn.Linear(self.rnn_size, self.vocab_size + 1)]))
         self.ctx2att = nn.Linear(self.rnn_size, self.att_hid_size)
 
         # For remove bad endding
