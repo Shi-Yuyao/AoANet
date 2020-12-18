@@ -122,32 +122,42 @@ class VAELanguageModelCriterion(nn.Module):
         super(VAELanguageModelCriterion, self).__init__()
 
     def kl_divergency_norm(self, mu, log_var):
-        batch = mu.size(0)
-        seq_len = mu.size(1)
         dim = mu.size(2)
         loss = - 0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
-        loss_ = torch.zeros(batch, seq_len).cuda()
-        for i in range(batch):
-            for j in range(seq_len):
-                loss_[i, j] = torch.sum(loss[i][j]) / dim
-        return loss_
+        loss = torch.sum(loss, dim=2) / dim
+        return loss
 
-    def forward(self, input_decoder, latent_space_encoder, target, mask):
+    def kl_divergency(self, mu1, mu2, log_var1, log_var2):
+        dim = mu1.size(2)
+        loss = 0.5 * ((log_var2 - log_var1) + (log_var1.exp() + (mu1 - mu2).pow(2)) / log_var2.exp() - 1)
+        loss = torch.sum(loss, dim=2) / dim
+        return loss
+
+    def forward(self, input_decoder, latent_space_encoder, latent_space_blackbox, target, mask):
         # truncate to the same size
         target = target[:, :input_decoder.size(1)]
         mask = mask[:, :input_decoder.size(1)]
         latent_mask = mask[:, 1: input_decoder.size(1)]
 
+        # loss between decoder and gt
         out_put_decoder = -input_decoder.gather(2, target.unsqueeze(2)).squeeze(2) * mask
         out_put_decoder = torch.sum(out_put_decoder) / torch.sum(mask)
 
-        mu = latent_space_encoder[0]
-        logvar = latent_space_encoder[1]
-        kl_loss_normal = self.kl_divergency_norm(mu, logvar)
+        # loss between encoder and norm distribution
+        mu1 = latent_space_encoder[0]
+        logvar1 = latent_space_encoder[1]
+        kl_loss_normal = self.kl_divergency_norm(mu1, logvar1)
         out_put_encoder = kl_loss_normal * latent_mask
         out_put_encoder = torch.sum(out_put_encoder) / torch.sum(latent_mask)
 
-        out_put_sum = out_put_decoder + out_put_encoder
+        # loss between blackbox and encoder
+        mu2 = latent_space_blackbox[0]
+        logvar2 = latent_space_blackbox[1]
+        kl_loss = self.kl_divergency(mu1, mu2, logvar1, logvar2)
+        out_put_blackbox = kl_loss * latent_mask
+        out_put_blackbox = torch.sum(out_put_blackbox) / torch.sum(latent_mask)
+
+        out_put_sum = out_put_decoder + out_put_encoder + out_put_blackbox
 
         return out_put_sum
 
