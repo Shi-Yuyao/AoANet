@@ -19,8 +19,9 @@ class LossWrapper(torch.nn.Module):
                 sc_flag):
         out = {}
         if not sc_flag:
-            out1, out2 = self.model(fc_feats, att_feats, labels, att_masks)
-            loss = self.crit(out1, out2, labels[:, 1:], masks[:, 1:])
+            # loss = self.crit(self.model(fc_feats, att_feats, labels, att_masks), labels[:, 1:], masks[:, 1:])
+            out1, out2, out3 = self.model(fc_feats, att_feats, labels, masks, att_masks)
+            loss = self.crit(out1, out2, out3, labels[:, 1:], masks[:, 1:])
         else:
             self.model.eval()
             with torch.no_grad():
