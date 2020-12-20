@@ -123,7 +123,7 @@ class AttModel(CaptionModel):
 
         return fc_feats, att_feats, p_att_feats, att_masks
 
-    def _forward(self, fc_feats, att_feats, seq, att_masks=None):
+    def _forward(self, fc_feats, att_feats, seq, masks, att_masks=None):
         batch_size = fc_feats.size(0)
         state = self.init_hidden(batch_size)
 
