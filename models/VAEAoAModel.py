@@ -160,6 +160,22 @@ class VAE_AoA_Refiner_Core(nn.Module):
         return self.norm(x)
 
 
+class VAE_AoA_Encoder_Layer(nn.Module):
+    def __init__(self, size, self_attn, feed_forward, dropout):
+        super(VAE_AoA_Encoder_Layer, self).__init__()
+        self.self_attn = self_attn
+        self.feed_forward = feed_forward
+        self.use_ff = 0
+        if self.feed_forward is not None:
+            self.use_ff = 1
+        self.sublayer = clones(SublayerConnection(size, dropout), 1 + self.use_ff)
+        self.size = size
+
+    def forward(self, x, mask):
+        x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))
+        return self.sublayer[-1](x, self.feed_forward) if self.use_ff else x
+
+
 class VAE_AoA_Encoder_Core(nn.Module):
     '''
         # 1.生成一个self Multi-head attention模块，对seq GT做自编码，同时生成
@@ -178,25 +194,28 @@ class VAE_AoA_Encoder_Core(nn.Module):
     def __init__(self, opt):
         super(VAE_AoA_Encoder_Core, self).__init__()
         self.latent_space_size = opt.latent_space_size
-        self.use_ff = 1
-        self.feed_forward = PositionwiseFeedForward(opt.rnn_size, 2048, 0.1)
-        self.dropout = 0.1
+
         self.embed_layer = nn.Sequential(Embeddings(d_model=512, vocab=opt.vocab_size + 1),
                                          # vocab_size+1为9488，即增加<END>
                                          nn.ReLU(),
                                          nn.Dropout(0.5))
         self.position_encoding_layer = PositionalEncoding(d_model=512, dropout=0.1, max_len=opt.seq_length)
-        self.attn1 = MultiHeadedDotAttention(h=8,
-                                             d_model=512,
-                                             project_k_v=0,
-                                             use_output_layer=1,
-                                             do_aoa=0,
-                                             norm_q=1)
-        self.attn2 = MultiHeadedDotAttention(h=8,
-                                             d_model=512,
-                                             do_aoa=1,
-                                             norm_q=0)
-        self.sublayer = clones(SublayerConnection(512, self.dropout), 1 + self.use_ff)
+
+        self.attn_att_feats = MultiHeadedDotAttention(h=8,
+                                                      d_model=512,
+                                                      do_aoa=1,
+                                                      norm_q=1)
+        attn = MultiHeadedDotAttention(opt.num_heads,
+                                       opt.rnn_size,
+                                       project_k_v=1,
+                                       scale=opt.multi_head_scale,
+                                       do_aoa=0,
+                                       norm_q=1)
+        layer = VAE_AoA_Encoder_Layer(opt.rnn_size, attn,
+                                      PositionwiseFeedForward(opt.rnn_size, 2048, 0.1)
+                                      if opt.use_ff else None, 0.1)
+        self.layers = clones(layer, 6)  # 将Encoder_Layer克隆6次
+        self.norm = LayerNorm(layer.size)  # 建立layer normalization
 
         self.MLP_layer = nn.Sequential(nn.Linear(1024, 1024), nn.LayerNorm(1024), nn.LeakyReLU())
         self.MLP_layer_mu = nn.Linear(1024, self.latent_space_size)
@@ -207,7 +226,7 @@ class VAE_AoA_Encoder_Core(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, refined_att_feats, seq_GT, mask=None):
+    def forward(self, refined_att_feats, seq_GT, masks_seq, masks_feats=None):
         # 网络传输过程：
         # 1.将Seq GT通过self Multi-head attention，生成m个ctx向量，称为c(i)
         # 2.将每一个ctx向量分别与image feature做Multi-head attention，生成对应的分值，称为hat_a(i)
@@ -215,14 +234,17 @@ class VAE_AoA_Encoder_Core(nn.Module):
         # 4.将新的ctx向量new_c(i)与上一时刻生成的latent sample z(i-1)通过一个MLP，生成均值与方差z(i)
         embedd_seq_GT = self.embed_layer(seq_GT)
         x = self.position_encoding_layer(embedd_seq_GT)
-        c = self.sublayer[0](x, lambda x: self.attn1(x, x, x, mask))  # 对seq_GT做self Multi-head attention
-        c = self.sublayer[-1](c, self.feed_forward) if self.use_ff else c
+
+        for layer in self.layers:
+            x = layer(x, masks_seq)
+        c = self.norm(x)
+
         new_c = []
         for i in range(c.size(1)):
             c_i = c[:, i, :]
-            new_c_i = self.attn2(c_i,
-                                 refined_att_feats.narrow(2, 0, 512),
-                                 refined_att_feats.narrow(2, 512, 512), mask)
+            new_c_i = self.attn_att_feats(c_i,
+                                          refined_att_feats.narrow(2, 0, 512),
+                                          refined_att_feats.narrow(2, 512, 512), mask=masks_feats)
             new_c.append(new_c_i)
         latent_sample_prior = torch.randn(new_c[0].size(0), new_c[0].size(1)).cuda()
         # 1save mu,2save log_var; batch_size; seq_len; latent dim
@@ -417,7 +439,7 @@ class VAEAoAModel(AttModel):
         else:
             self.refiner = lambda x, y: x
         self.encoder = VAE_AoA_Encoder_Core(opt)
-        # self.blackbox = VAE_AoA_Black_Core(opt)
+        self.blackbox = VAE_AoA_Black_Core(opt)
         self.core = VAE_AoA_Decoder_Core(opt)
 
     def _prepare_feature(self, fc_feats, att_feats, att_masks):
@@ -441,18 +463,22 @@ class VAEAoAModel(AttModel):
 
         return mean_feats, att_feats, p_att_feats, att_masks
 
-    def _forward(self, fc_feats, att_feats, seq, att_masks=None):
+    def _forward(self, fc_feats, att_feats, seq, masks, att_masks=None):
         batch_size = fc_feats.size(0)
         state_decoder = self.init_hidden(batch_size)
         state_blackbox = self.init_hidden(batch_size)
 
         outputs = fc_feats.new_zeros(batch_size, seq.size(1) - 1, self.vocab_size + 1)
-
         # Prepare the features
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
         # pp_att_feats is used for attention, we cache it in advance to reduce computation cost
-        latent_space_encoder, latent_space_sample_encoder = self.encoder(pp_att_feats, seq[:, 1:-1])
+        # 将masks转换为与seqGT匹配的shape,由于原始mask会优先保留1(在算loss时,需要增加1位<END>，会正数,而这里与loss里的转换不同，是倒数)
+        masks = masks[:, -seq[:, 1:-1].shape[1]:]
+        latent_space_encoder, latent_sample_encoder = self.encoder(pp_att_feats, seq[:, 1:-1], masks)
         z_blackbox_init = torch.randn(batch_size, self.latent_space_size).cuda()
+        latent_space_blackbox = torch.zeros(2, batch_size, seq.size(1) - 2, self.latent_space_size).cuda()
+        decoder_x_prior = list()
+        latent_sample_blackbox = list()
         for i in range(seq.size(1) - 1):
             if self.training and i >= 1 and self.ss_prob > 0.0:  # otherwiste no need to sample
                 sample_prob = fc_feats.new(batch_size).uniform_(0, 1)
@@ -474,24 +500,23 @@ class VAEAoAModel(AttModel):
                 break
             # 'it' contains a word index
             xt = self.embed(it)
-            zt = latent_space_sample_encoder[i]
-            decoder_x_prior = list()
-            output, state_decoder, x_prior = self._get_logprobs_state(xt, zt,
-                                                                      p_fc_feats, p_att_feats, pp_att_feats,
+            zt = latent_sample_encoder[i]
+
+            output, state_decoder, x_prior = self._get_logprobs_state(xt, zt, p_fc_feats,
+                                                                      p_att_feats, pp_att_feats,
                                                                       p_att_masks, state_decoder)
             outputs[:, i] = output
-            decoder_x_prior.append(x_prior)
 
-            latent_sample_blackbox = list()
-            latent_space_blackbox = torch.zeros(2, batch_size, seq.size(1) - 2, self.latent_space_size).cuda()
             if i == 0:
-                zt_blackbox, mu_blackbox, log_var_blackbox, state_blackbox = self.blackbox(it,
+                zt_blackbox, mu_blackbox, log_var_blackbox, state_blackbox = self.blackbox(xt,
                                                                                            p_fc_feats,
                                                                                            z_blackbox_init,
                                                                                            state_blackbox)
                 latent_space_blackbox[0, :, i] = mu_blackbox
                 latent_space_blackbox[1, :, i] = log_var_blackbox
                 latent_sample_blackbox.append(zt_blackbox)
+            elif i == seq.size(1) - 2:
+                continue
             else:
                 zt_blackbox, mu_blackbox, log_var_blackbox, state_blackbox = self.blackbox(decoder_x_prior[-1],
                                                                                            p_fc_feats,
@@ -500,8 +525,8 @@ class VAEAoAModel(AttModel):
                 latent_space_blackbox[0, :, i] = mu_blackbox
                 latent_space_blackbox[1, :, i] = log_var_blackbox
                 latent_sample_blackbox.append(zt_blackbox)
-
-        return [outputs, latent_space_encoder]
+            decoder_x_prior.append(x_prior)
+        return [outputs, latent_space_encoder, latent_space_blackbox]
 
     def _get_logprobs_state(self, xt, zt, fc_feats, att_feats, p_att_feats, att_masks, state):
 
