@@ -177,6 +177,10 @@ def train(opt):
             loss_sp = loss / acc_steps
 
             loss_sp.backward()
+            # 检查是否有部分网络没有进行forward
+            # for name, parameters in dp_lw_model.named_parameters():
+            #     if parameters.grad == None:
+            #         print(name, ':', parameters.size())
             if ((iteration + 1) % acc_steps == 0):
                 utils.clip_gradient(optimizer, opt.grad_clip)
                 optimizer.step()
@@ -224,8 +228,11 @@ def train(opt):
                 eval_kwargs = {'split': 'val',
                                'dataset': opt.input_json}
                 eval_kwargs.update(vars(opt))
+                # beam_size>1时显示没有done_beams属性，将模型从dp_model替换为model
+                # val_loss, predictions, lang_stats = eval_utils.eval_split(
+                #     dp_model, lw_model.crit, loader, eval_kwargs)
                 val_loss, predictions, lang_stats = eval_utils.eval_split(
-                    dp_model, lw_model.crit, loader, eval_kwargs)
+                    model, lw_model.crit, loader, eval_kwargs)
 
                 if opt.reduce_on_plateau:
                     if 'CIDEr' in lang_stats:
