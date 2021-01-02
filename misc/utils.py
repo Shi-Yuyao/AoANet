@@ -56,27 +56,32 @@ def if_use_feat(caption_model):
 
 # Input: seq, N*D numpy array, with element 0 .. vocab_size. 0 is END token.
 def decode_sequence(ix_to_word, seq):
-    N, D = seq.size()
-    out = []
-    for i in range(N):
-        txt = ''
-        for j in range(D):
-            ix = seq[i, j]
-            if ix > 0:
-                if j >= 1:
-                    txt = txt + ' '
-                txt = txt + ix_to_word[str(ix.item())]
-            else:
-                break
-        if int(os.getenv('REMOVE_BAD_ENDINGS', '0')):
-            flag = 0
-            words = txt.split(' ')
-            for j in range(len(words)):
-                if words[-j - 1] not in bad_endings:
-                    flag = -j
+    S, N, D = seq.size()
+    # N, D = seq.size()
+    out = [[] for _ in range(S)]
+    # out = []
+    for k in range(S):
+        for i in range(N):
+            txt = ''
+            for j in range(D):
+                ix = seq[k][i, j]
+                # ix = seq[i, j]
+                if ix > 0:
+                    if j >= 1:
+                        txt = txt + ' '
+                    txt = txt + ix_to_word[str(ix.item())]
+                else:
                     break
-            txt = ' '.join(words[0:len(words) + flag])
-        out.append(txt.replace('@@ ', ''))
+            if int(os.getenv('REMOVE_BAD_ENDINGS', '0')):
+                flag = 0
+                words = txt.split(' ')
+                for j in range(len(words)):
+                    if words[-j - 1] not in bad_endings:
+                        flag = -j
+                        break
+                txt = ' '.join(words[0:len(words) + flag])
+            out[k].append(txt.replace('@@ ', ''))
+            # out.append(txt.replace('@@ ', ''))
     return out
 
 
@@ -137,7 +142,6 @@ class VAELanguageModelCriterion(nn.Module):
         # truncate to the same size
         target = target[:, :input_decoder.size(1)]
         mask = mask[:, :input_decoder.size(1)]
-        latent_mask = mask[:, 1: input_decoder.size(1)]
 
         # loss between decoder and gt
         out_put_decoder = -input_decoder.gather(2, target.unsqueeze(2)).squeeze(2) * mask
@@ -147,15 +151,15 @@ class VAELanguageModelCriterion(nn.Module):
         mu1 = latent_space_encoder[0]
         logvar1 = latent_space_encoder[1]
         kl_loss_normal = self.kl_divergency_norm(mu1, logvar1)
-        out_put_encoder = kl_loss_normal * latent_mask
-        out_put_encoder = torch.sum(out_put_encoder) / torch.sum(latent_mask)
+        out_put_encoder = kl_loss_normal * mask
+        out_put_encoder = torch.sum(out_put_encoder) / torch.sum(mask)
 
         # loss between blackbox and encoder
         mu2 = latent_space_blackbox[0]
         logvar2 = latent_space_blackbox[1]
         kl_loss = self.kl_divergency(mu1, mu2, logvar1, logvar2)
-        out_put_blackbox = kl_loss * latent_mask
-        out_put_blackbox = torch.sum(out_put_blackbox) / torch.sum(latent_mask)
+        out_put_blackbox = kl_loss * mask
+        out_put_blackbox = torch.sum(out_put_blackbox) / torch.sum(mask)
 
         out_put_sum = out_put_decoder + out_put_encoder + out_put_blackbox
 
