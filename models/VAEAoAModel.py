@@ -53,7 +53,7 @@ class MultiHeadedDotAttention(nn.Module):
         # apply aoa after attention?
         self.use_aoa = do_aoa
         if self.use_aoa:
-            # 建立一个in1024 out1024的fc+GLU
+            # setup a fc(output is 2 x input that can make attention output + attention input feed to fc) and GLU
             self.aoa_layer = nn.Sequential(nn.Linear((1 + scale) * d_model, 2 * d_model), nn.GLU())
             # dropout to the input of AoA layer
             if dropout_aoa > 0:
@@ -70,7 +70,8 @@ class MultiHeadedDotAttention(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, query, value, key, mask=None):
-        if mask is not None:  # [query,value,key] size[batch_size,object_nums,dim]
+        # query, can be attention features(in refiner); can be sequence(in encoder)
+        if mask is not None:
             if len(mask.size()) == 2:
                 mask = mask.unsqueeze(-2)
             # Same mask applied to all h heads.
@@ -91,7 +92,7 @@ class MultiHeadedDotAttention(nn.Module):
             key_ = key.view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
             value_ = value.view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
         else:
-            # q,k,v分别经过fc，分成8个head
+            # q,k,v pass fc first and use view() detach to 8 head
             query_, key_, value_ = [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
                                     for l, x in zip(self.linears, (query, key, value))]
 
@@ -132,8 +133,8 @@ class VAE_AoA_Refiner_Core(nn.Module):
     """
     input:
         1. attended features: [batch_size, object_num, attention_dim]
-           (original attention features dim pass feature embedding layer is attention_dim)
-        2. attended masks: X
+           (original attention features dim feed to feature embedding layer, obtain new attention_dim)
+        2. attended masks: [batch_size, mask_dim]
     output:
         refined attention features: [batch_size, object_num, attention_dim]
     """
@@ -182,7 +183,7 @@ class VAE_AoA_Encoder_Core(nn.Module):
     input:
         1. prepared refined attended features: [batch_size, object_num, 2 x attention_dim] for AoA
         2. sequence ground truth: [batch_size, max_sequence_length] for multi-head self-attention
-        3. sequence masks: [batch_size, max_sequence_length] for multi-head self-attention's masks
+        3. padding masks: [batch_size, max_sequence_length] for multi-head self-attention's masks
     output:
         1. latent_space: [2, batch_size, max_sequence_length, latent_size]
             A for mu: [batch_size, latent_size] x max_sequence_length, merge as torch
@@ -197,40 +198,40 @@ class VAE_AoA_Encoder_Core(nn.Module):
 
     def __init__(self, opt, embed_layer):
         """
-        1. A.建立multi-head self-attention模块1(Layer x 6), 对sequence GT横向做自编码, 生成ctx vector[cr1,cr2,...,crn]
+        1. A.建立使用mask的multi-head self-attention模块1(Layer x 6), 对sequence GT横向做自编码, 生成ctx vector[cr1,cr2,...,crn]
             input:
                 sequence GT row: [batch_size, max_sequence_length, word_embed_dim]
                 mask r: [batch_size, max_sequence_length]
             output:
                 ctx vector cr_i: [batch_size, word_embed_dim]
                 (ctx vector cr: merge all ci as torch [batch_size, max_sequence_length, word_embed_dim])
-           B.建立multi-head self-attention模块2(Layer x 3), 对sequence GT纵向做自编码, 生成ctx vector[cc1,cc2,...,ccm]
+           B.建立使用mask的multi-head self-attention模块2(Layer x 3), 对sequence GT纵向做自编码, 生成ctx vector[cc1,cc2,...,ccm]
             input:
                 sequence GT column: [max_sequence_length, batch_size, word_embed_dim]
                 mask c: [max_sequence_length, batch_size]
             output:
                 ctx vector cc_i: [max_sequence_length, word_embed_dim]
                 (ctx vector cc: merge all ci as torch [max_sequence_length, batch_size, word_embed_dim])
-           C.将cr与cc进行结合
+           C.将cr与cc进行结合(按位相加)
             input:
                 cr: [batch_size, max_sequence_length, word_embed_dim]
                 cc: [max_sequence_length, batch_size, word_embed_dim]
             output:
                 ctx vector c: [batch_size, max_sequence_length, word_embed_dim]
             PS. word_embed_dim会决定rnn_size, 因为会送入lstm中
-        3. 建立一个带AoA的multi-head attention模块, 为ctx vector嵌入图像信息, 生成new ci
+        3. 建立一个带AoA的multi-head attention模块, 为ctx vector嵌入图像信息, 生成new c
             input:
-                ctx vector ci: [batch_size, word_embed_dim]
+                ctx vector c: [batch_size, max_sequence_length, word_embed_dim]
                 prepared refined image attended feature A': [batch_size, object_num, 2 x attention_dim]
             output:
-                new ctx vector new_ci: [batch_size, word_embed_dim]
-                (new ctx vector c: new_ci x max_sequence_length, as list)
+                new ctx vector new_c: [batch_size, max_sequence_length, word_embed_dim]
+            PS. 生成的new_c, 由于不同captions之间的长度不同，所以需要进行mask, 以屏蔽掉没有意义的词位上做出attention的信息, 然后再通过normlayer做归一化
         4. 建立一个MLP模块, 为new ctx vector生成latent space, 时序生成
             (MLP模块包含有: fc层; mu计算层; logvar计算层)
             input:
-                ctx vector ci: [batch_size, word_embed_dim]
+                new ctx vector new_ci: [batch_size, word_embed_dim]
                 prior latent sample z_i-1: [batch_size, latent_size]
-                PS. latent_size会决定rnn_size, 因为会送入lstm中
+                PS. 最初的latent sample是随机初始化的; latent_size会决定rnn_size, 因为会送入lstm中
             output:
                 mu_encoder mu_i: [batch_size, latent_size]
                 logvar_encoder logvar_i: [batch_size, latent_size]
@@ -295,13 +296,13 @@ class VAE_AoA_Encoder_Core(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, refined_p_att_feats, seq_GT, masks_padding, latent_sample_prior, masks_seq=None):
+    def forward(self, refined_p_att_feats, seq_GT, latent_sample_prior, masks_padding, masks_att=None):
         # embedding seq row and column, just row need position encoding
         embedd_seq_GT = self.embed(seq_GT)
         x = self.position_encoded(embedd_seq_GT)
         y = self.embed(seq_GT.t())
 
-        # seq row and column pass multi-head self-attention
+        # seq row and column feed to multi-head self-attention with masks
         for layer in self.layers_r:
             x = layer(x, masks_padding)
         cr = self.norm(x)
@@ -311,45 +312,23 @@ class VAE_AoA_Encoder_Core(nn.Module):
         # TODO: make cc and cr use add or concatenate？
         c = cr + cc.transpose(0, 1).contiguous()
 
-        # new_c = []
-        # for i in range(c.size(1)):
-        #     c_i = c[:, i, :]
-        #     new_c_i = self.att_p_refined_feats(c_i,
-        #                                        refined_p_att_feats.narrow(
-        #                                            2, 0, self.multi_head_scale * self.d_model),
-        #                                        refined_p_att_feats.narrow(
-        #                                            2, self.multi_head_scale * self.d_model,
-        #                                               self.multi_head_scale * self.d_model),
-        #                                        mask=masks_seq)
-        #     new_c.append(new_c_i)
+        # each word position make multi-head attention with refined image features to embed image features
         new_c = self.att_p_refined_feats(c,
                                          refined_p_att_feats.narrow(2, 0, self.multi_head_scale * self.d_model),
                                          refined_p_att_feats.narrow(2, self.multi_head_scale * self.d_model,
                                                                     self.multi_head_scale * self.d_model),
-                                         mask=masks_seq)
+                                         mask=masks_att)
 
-        new_mask = masks_padding.unsqueeze(-1).expand(c.size(0), c.size(1), c.size(2))
-        new_c = torch.mul(new_c, new_mask)
+        # cause captions' different length, use expanded padding masks to mask no-mean word positions' attention value
+        new_mask_padding = masks_padding.unsqueeze(-1).expand(c.size(0), c.size(1), c.size(2))
+        new_c = torch.mul(new_c, new_mask_padding)
         new_c = self.norm(new_c)
 
         # A save mu, B save log_var; (2, batch_size, seq_len+1, latent dim); seq_len+1 for <END> token's z_n+1
         latent_space = torch.zeros(2, seq_GT.size(0), seq_GT.size(1) + 1, self.latent_size).cuda()
 
         latent_sample = list()
-        # for index in enumerate(new_c):
-        #     # TODO: Because c is 5 different length captions per image, z mu logvar need mask or control?
-        #     if index >= 1 and masks_padding[:, index].sum() == 0:
-        #         break
-        #     mlp_input = torch.cat((j, latent_sample_prior), dim=1)
-        #     mlp_output = self.MLP_layer(mlp_input)
-        #     mu = self.MLP_layer_mu(mlp_output)
-        #     log_var = self.MLP_layer_logvar(mlp_output)
-        #     latent_space[0, :, index] = mu
-        #     latent_space[1, :, index] = log_var
-        #     latent_sample_prior = self.reparameterize(mu, log_var)
-        #     latent_sample.append(latent_sample_prior)
         for index in range(new_c.size(1)):
-            # TODO: Because c is 5 different length captions per image, z mu logvar need mask or control?
             if index >= 1 and masks_padding[:, index].sum() == 0:
                 break
             mlp_input = torch.cat((new_c[:, index, :], latent_sample_prior), dim=1)
@@ -358,9 +337,17 @@ class VAE_AoA_Encoder_Core(nn.Module):
             log_var = self.MLP_layer_logvar(mlp_output)
             latent_space[0, :, index] = mu
             latent_space[1, :, index] = log_var
-            latent_sample_prior = self.reparameterize(mu, log_var)
+            # same as new_c, use expanded padding masks to mask no-mean word positions' latent sample
+            latent_sample_prior = self.reparameterize(mu, log_var) * new_mask_padding[:, index, :]
             latent_sample.append(latent_sample_prior)
 
+        # TODO: use expanded padding masks to mask new_c and z is feasible?
+        #  1. masked new_c is available, that no-mean word position is 0
+        #  2. use masked new_c generate mu and logvar are important cause blackbox need to learn how to simulate them.
+        #     for no-mean word position 0 generate mu and var means <END> token, blackbox must learn it to end seq
+        #  3. use unmasked mu and logvar generate z and masked z make no-mean word position's z is 0
+        #  4. masked z generate seq to make loss
+        #  5. but no-mean word position 0 generate z can not obtain available loss for its mu and logvar, how to fix it?
         # add a 0 latent sample for token <END>, make it easy to train and generate <END> token in decoder
         latent_sample.append(torch.zeros(seq_GT.size(0), self.latent_size).cuda())
 
@@ -555,10 +542,10 @@ class VAE_AoA_Black_Core(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, x_prior, mean_feats_ctx_prior, z_prior, state):
+    def forward(self, x_prior, mean_feats, z_prior, state, state_decoder):
         # TODO: should blackbox LSTM use c_t-1 add to mean feature as same as Decoder?
-        # mean_feats_ctx_prior is the mean plus context vector last time step in decoder saved in it's state[0][1]
-        h, c = self.att_lstm(torch.cat([x_prior, z_prior, mean_feats_ctx_prior], 1), state)
+        # mean features + context vector last time step in decoder which saved in state_decoder[0][1]
+        h, c = self.att_lstm(torch.cat([x_prior, z_prior, mean_feats + state_decoder[0][1]], 1), state)
         state = (h, c)
 
         mlp_output = self.MLP_layer(h)
@@ -600,7 +587,6 @@ class VAEAoAModel(AttModel):
 
         self.sample_nums = opt.sample_quantity
         self.latent_size = opt.latent_space_size
-        self.ss_prob = 0.2
 
     def init_hidden_blackbox(self, bsz):
         weight = next(self.parameters())
@@ -612,15 +598,15 @@ class VAEAoAModel(AttModel):
         Parameters
         ----------
         fc_feats: X
-        att_feats: [batch_size, object_nums, attention_dims]
-        att_masks: X
+        att_feats: [batch_size, object_num, attention_dim]
+        att_masks: [batch_size, mask_dim]
 
         Returns
         -------
-        mean_feats: [batch_size, attention_dims]
-        att_feats: [batch_size, object_nums, attention_dims]
-        p_att_feats: [batch_size, object_nums, 2 x attention_dims]
-        att_masks: X
+        mean_feats: [batch_size, attention_dim]
+        att_feats: [batch_size, object_num, attention_dim]
+        p_att_feats: [batch_size, object_num, 2 x attention_dim]
+        att_masks: [batch_size, mask_dim]
         """
         att_feats, att_masks = self.clip_att(att_feats, att_masks)
 
@@ -653,19 +639,17 @@ class VAEAoAModel(AttModel):
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
 
         # masks match seqGT shape,由于原始mask会优先保留1(在算loss时,需要增加1位<END>，会正数,而这里与loss里的转换不同，是倒数)
-        masks = masks[:, -seq[:, 1:-1].shape[1]:]
+        p_padd_masks = masks[:, -seq[:, 1:-1].shape[1]:]
 
         # init z for encoder and blackbox
         z_init = torch.randn(batch_size, self.latent_size).cuda()
 
         # obtain encoder mu, logvar and z
-        latent_space_encoder, latent_sample_encoder = self.encoder(pp_att_feats, seq[:, 1:-1], masks, z_init)
+        latent_space_encoder, latent_sample_encoder = self.encoder(pp_att_feats, seq[:, 1:-1], z_init,
+                                                                   p_padd_masks, p_att_masks)
 
         # a torch tensor to save mu, var generated from blackbox, length max_seq+1 for <END> token same as encoder
         latent_space_blackbox = torch.zeros(2, batch_size, seq.size(1) - 1, self.latent_size).cuda()
-
-        latent_sample_blackbox = list()
-        state_decoder_prior = list()
 
         for i in range(seq.size(1) - 1):
             if self.training and i >= 1 and self.ss_prob > 0.0:  # otherwiste no need to sample
@@ -676,9 +660,6 @@ class VAEAoAModel(AttModel):
                 else:
                     sample_ind = sample_mask.nonzero().view(-1)
                     it = seq[:, i].data.clone()
-                    # prob_prev = torch.exp(outputs[-1].data.index_select(0, sample_ind)) # fetch prev distribution: shape Nx(M+1)
-                    # it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1))
-                    # prob_prev = torch.exp(outputs[-1].data) # fetch prev distribution: shape Nx(M+1)
                     prob_prev = torch.exp(outputs[:, i - 1].detach())  # fetch prev distribution: shape Nx(M+1)
                     it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1).index_select(0, sample_ind))
             else:
@@ -692,36 +673,32 @@ class VAEAoAModel(AttModel):
             # embedding it alone make sure that same embedded vector feed to decoder and blackbox
             xt = self.embed(it)
 
-            # get out latent sample form encoder list
-            zt = latent_sample_encoder[i]
-
-            # #all arguments feed to decoder and obtain output state and ctx vector
-            output, state_decoder = self._get_logprobs_state(xt, zt, p_fc_feats, p_att_feats,
-                                                             pp_att_feats, state_decoder, p_att_masks)
-            outputs[:, i] = output
-
             # feed init z same as encoder
             if i == 0:
                 zt_blackbox, mu_blackbox, log_var_blackbox, state_blackbox = self.blackbox(xt,
                                                                                            p_fc_feats,
                                                                                            z_init,
-                                                                                           state_blackbox)
+                                                                                           state_blackbox,
+                                                                                           state_decoder)
                 latent_space_blackbox[0, :, i] = mu_blackbox
                 latent_space_blackbox[1, :, i] = log_var_blackbox
-                latent_sample_blackbox.append(zt_blackbox)
 
             else:
-                mean_c_prior = p_fc_feats + state_decoder_prior[-1]
                 zt_blackbox, mu_blackbox, log_var_blackbox, state_blackbox = self.blackbox(xt,
-                                                                                           mean_c_prior,
-                                                                                           latent_sample_blackbox[-1],
-                                                                                           state_blackbox)
+                                                                                           p_fc_feats,
+                                                                                           zt_blackbox,
+                                                                                           state_blackbox,
+                                                                                           state_decoder)
                 latent_space_blackbox[0, :, i] = mu_blackbox
                 latent_space_blackbox[1, :, i] = log_var_blackbox
-                latent_sample_blackbox.append(zt_blackbox)
 
-            # get out last time step output/context vector c_t-1
-            state_decoder_prior.append(state_decoder[0][1])
+            # get out latent sample form encoder list
+            zt = latent_sample_encoder[i]
+
+            # all arguments feed to decoder and obtain output state and ctx vector
+            output, state_decoder = self._get_logprobs_state(xt, zt, p_fc_feats, p_att_feats,
+                                                             pp_att_feats, state_decoder, p_att_masks)
+            outputs[:, i] = output
 
         # TODO: need to figure out how to use z_m+1 loss between blackbox and encoder
         return [outputs, latent_space_encoder, latent_space_blackbox]
@@ -736,7 +713,8 @@ class VAEAoAModel(AttModel):
     def _sample_get_logprobs_state(self, it, zt_blackbox, state_blackbox, state_decoder,
                                    fc_feats, att_feats, p_att_feats, att_masks):
         xt = self.embed(it)
-        zt_decoder, mu, log_var, state_blackbox = self.blackbox(xt, fc_feats, zt_blackbox, state_blackbox)
+        zt_decoder, mu, log_var, state_blackbox = self.blackbox(xt, fc_feats, zt_blackbox,
+                                                                state_blackbox, state_decoder)
 
         output, state_decoder = self.core(xt, zt_decoder, fc_feats, att_feats, p_att_feats, state_decoder, att_masks)
         logprobs = F.log_softmax(self.logit(output), dim=1)
@@ -807,105 +785,108 @@ class VAEAoAModel(AttModel):
         sample_method = opt.get('sample_method', 'greedy')
         beam_size = opt.get('beam_size', 1)
         temperature = opt.get('temperature', 1.0)
-        decoding_constraint = opt.get('decoding_constraint', 0)
+        decoding_constraint = opt.get('decoding_constraint', 1)
         block_trigrams = opt.get('block_trigrams', 0)
         remove_bad_endings = opt.get('remove_bad_endings', 0)
         if beam_size > 1:
             return self._sample_beam(fc_feats, att_feats, att_masks, opt)
 
         batch_size = fc_feats.size(0)
-        state_decoder = self.init_hidden(batch_size)
-        state_blackbox = self.init_hidden_blackbox(batch_size)
 
         p_fc_feats, p_att_feats, pp_att_feats, p_att_masks = self._prepare_feature(fc_feats, att_feats, att_masks)
 
         trigrams = []  # will be a list of batch_size dictionaries
 
-        # seq = fc_feats.new_zeros((self.sample_nums, batch_size, self.seq_length), dtype=torch.long)
-        # seqLogprobs = fc_feats.new_zeros(self.sample_nums, batch_size, self.seq_length)
+        seq = fc_feats.new_zeros((self.sample_nums, batch_size, self.seq_length), dtype=torch.long)
+        seqLogprobs = fc_feats.new_zeros(self.sample_nums, batch_size, self.seq_length)
 
-        seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
-        seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
+        # seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
+        # seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
 
-        # for k in range(self.sample_nums):
-        for t in range(self.seq_length + 1):
-            if t == 0:
-                it = fc_feats.new_zeros(batch_size, dtype=torch.long)  # init input <bos>
-                zt = torch.randn(batch_size, self.latent_size).cuda()  # init input z0
+        for k in range(self.sample_nums):
+            state_decoder = self.init_hidden(batch_size)  # init decoder state for each sample
+            state_blackbox = self.init_hidden_blackbox(batch_size)  # init blackbox state for each sample
+            zt = torch.randn(batch_size, self.latent_size).cuda()  # init input z0 for each sample
 
-                logprobs, state_decoder, state_blackbox, zt \
-                    = self._sample_get_logprobs_state(it, zt, state_blackbox, state_decoder,
-                                                      p_fc_feats, p_att_feats,
-                                                      pp_att_feats, p_att_masks)
-            else:
-                p_fc_feats = p_fc_feats + state_decoder[0][1]
-                logprobs, state_decoder, state_blackbox, zt \
-                    = self._sample_get_logprobs_state(it, zt, state_blackbox, state_decoder,
-                                                      p_fc_feats, p_att_feats,
-                                                      pp_att_feats, p_att_masks)
+            for t in range(self.seq_length + 1):
+                if t == 0:
+                    it = fc_feats.new_zeros(batch_size, dtype=torch.long)  # init input <bos>
 
-            if decoding_constraint and t > 0:
-                tmp = logprobs.new_zeros(logprobs.size())
-                # tmp.scatter_(1, seq[k, :, t - 1].data.unsqueeze(1), float('-inf'))
-                tmp.scatter_(1, seq[:, t - 1].data.unsqueeze(1), float('-inf'))
-                logprobs = logprobs + tmp
+                    logprobs, state_decoder, state_blackbox, zt \
+                        = self._sample_get_logprobs_state(it, zt, state_blackbox, state_decoder,
+                                                          p_fc_feats, p_att_feats,
+                                                          pp_att_feats, p_att_masks)
+                else:
+                    logprobs, state_decoder, state_blackbox, zt \
+                        = self._sample_get_logprobs_state(it, zt, state_blackbox, state_decoder,
+                                                          p_fc_feats, p_att_feats,
+                                                          pp_att_feats, p_att_masks)
 
-            if remove_bad_endings and t > 0:
-                tmp = logprobs.new_zeros(logprobs.size())
-                # prev_bad = np.isin(seq[k, :, t - 1].data.cpu().numpy(), self.bad_endings_ix)
-                prev_bad = np.isin(seq[:, t - 1].data.cpu().numpy(), self.bad_endings_ix)
-                # Impossible to generate remove_bad_endings
-                tmp[torch.from_numpy(prev_bad.astype('uint8')), 0] = float('-inf')
-                logprobs = logprobs + tmp
+                if decoding_constraint and t > 0:
+                    tmp = logprobs.new_zeros(logprobs.size())
+                    # tmp.scatter_(1, seq[:, t - 1].data.unsqueeze(1), float('-inf'))
+                    tmp.scatter_(1, seq[k, :, t - 1].data.unsqueeze(1), float('-inf'))
+                    logprobs = logprobs + tmp
 
-            # Mess with trigrams
-            if block_trigrams and t >= 3:
-                # Store trigram generated at last step
-                # prev_two_batch = seq[k, :, t - 3:t - 1]
-                prev_two_batch = seq[:, t - 3:t - 1]
-                for i in range(batch_size):  # = seq.size(0)
-                    prev_two = (prev_two_batch[i][0].item(), prev_two_batch[i][1].item())
-                    # current = seq[k][i][t - 1]
-                    current = seq[i][t - 1]
-                    if t == 3:  # initialize
-                        trigrams.append({prev_two: [current]})  # {LongTensor: list containing 1 int}
-                    elif t > 3:
-                        if prev_two in trigrams[i]:  # add to list
-                            trigrams[i][prev_two].append(current)
-                        else:  # create list
-                            trigrams[i][prev_two] = [current]
-                # Block used trigrams at next step
-                # prev_two_batch = seq[k, :, t - 2:t]
-                prev_two_batch = seq[:, t - 2:t]
-                mask = torch.zeros(logprobs.size(), requires_grad=False).cuda()  # batch_size x vocab_size
-                for i in range(batch_size):
-                    prev_two = (prev_two_batch[i][0].item(), prev_two_batch[i][1].item())
-                    if prev_two in trigrams[i]:
-                        for j in trigrams[i][prev_two]:
-                            mask[i, j] += 1
-                # Apply mask to log probs
-                # logprobs = logprobs - (mask * 1e9)
-                alpha = 2.0  # = 4
-                logprobs = logprobs + (mask * -0.693 * alpha)  # ln(1/2) * alpha (alpha -> infty works best)
+                if remove_bad_endings and t > 0:
+                    tmp = logprobs.new_zeros(logprobs.size())
+                    # prev_bad = np.isin(seq[:, t - 1].data.cpu().numpy(), self.bad_endings_ix)
+                    prev_bad = np.isin(seq[k, :, t - 1].data.cpu().numpy(), self.bad_endings_ix)
+                    # Impossible to generate remove_bad_endings
+                    # tmp[torch.from_numpy(prev_bad.astype('bool')), 0] = float('-inf')
+                    tmp[torch.from_numpy(prev_bad.astype('uint8')), 0] = float('-inf')  # uint8有时会报warning
+                    logprobs = logprobs + tmp
 
-            # sample the next word
-            if t == self.seq_length:  # skip if we achieve maximum length
-                break
-            it, sampleLogprobs = self.sample_next_word(logprobs, sample_method, temperature)
+                # Mess with trigrams
+                if block_trigrams and t >= 3:
+                    # Store trigram generated at last step
+                    # prev_two_batch = seq[:, t - 3:t - 1]
+                    prev_two_batch = seq[k, :, t - 3:t - 1]
+                    for i in range(batch_size):  # = seq.size(0)
+                        prev_two = (prev_two_batch[i][0].item(), prev_two_batch[i][1].item())
+                        # current = seq[i][t - 1]
+                        current = seq[k][i][t - 1]
+                        if t == 3:  # initialize
+                            trigrams.append({prev_two: [current]})  # {LongTensor: list containing 1 int}
+                        elif t > 3:
+                            if prev_two in trigrams[i]:  # add to list
+                                trigrams[i][prev_two].append(current)
+                            else:  # create list
+                                trigrams[i][prev_two] = [current]
+                    # Block used trigrams at next step
+                    # prev_two_batch = seq[:, t - 2:t]
+                    prev_two_batch = seq[k, :, t - 2:t]
+                    mask = torch.zeros(logprobs.size(), requires_grad=False).cuda()  # batch_size x vocab_size
+                    for i in range(batch_size):
+                        prev_two = (prev_two_batch[i][0].item(), prev_two_batch[i][1].item())
+                        if prev_two in trigrams[i]:
+                            for j in trigrams[i][prev_two]:
+                                mask[i, j] += 1
+                    # Apply mask to log probs
+                    # logprobs = logprobs - (mask * 1e9)
+                    alpha = 2.0  # = 4
+                    logprobs = logprobs + (mask * -0.693 * alpha)  # ln(1/2) * alpha (alpha -> infty works best)
 
-            # stop when all finished
-            if t == 0:
-                unfinished = it > 0
-            else:
-                unfinished = unfinished * (it > 0)
-            it = it * unfinished.type_as(it)
-            # seq[k, :, t] = it
-            # seqLogprobs[k, :, t] = sampleLogprobs.view(-1)
-            seq[:, t] = it
-            seqLogprobs[:, t] = sampleLogprobs.view(-1)
-            # quit loop if all sequences have finished
-            if unfinished.sum() == 0:
-                break
+                # sample the next word
+                if t == self.seq_length:  # skip if we achieve maximum length
+                    break
+                it, sampleLogprobs = self.sample_next_word(logprobs, sample_method, temperature)
 
-        return seq, seqLogprobs
-        # return seq.transpose(0, 1).contiguous(), seqLogprobs.transpose(0, 1).contiguous()
+                # stop when all finished
+                if t == 0:
+                    unfinished = it > 0
+                else:
+                    unfinished = unfinished * (it > 0)
+
+                it = it * unfinished.type_as(it)
+                # seq[:, t] = it
+                # seqLogprobs[:, t] = sampleLogprobs.view(-1)
+                seq[k, :, t] = it
+                seqLogprobs[k, :, t] = sampleLogprobs.view(-1)
+
+                # quit loop if all sequences have finished
+                if unfinished.sum() == 0:
+                    break
+
+        # return seq, seqLogprobs
+        return seq.transpose(0, 1).contiguous(), seqLogprobs.transpose(0, 1).contiguous()
