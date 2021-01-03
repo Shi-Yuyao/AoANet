@@ -712,6 +712,10 @@ class VAEAoAModel(AttModel):
 
     def _sample_get_logprobs_state(self, it, zt_blackbox, state_blackbox, state_decoder,
                                    fc_feats, att_feats, p_att_feats, att_masks):
+        """
+        1. 如果选择return zt_blackbox, 则表示blackbox每一个时刻输入的latent sample是不变的, 统一为初始化的z_init
+        2. 如果选择return zt_decoder, 则表示blackbox每一个时刻输入的latent sample与训练时一致, 为上一时刻产生的z_t-1
+        """
         xt = self.embed(it)
         zt_decoder, mu, log_var, state_blackbox = self.blackbox(xt, fc_feats, zt_blackbox,
                                                                 state_blackbox, state_decoder)
@@ -719,15 +723,14 @@ class VAEAoAModel(AttModel):
         output, state_decoder = self.core(xt, zt_decoder, fc_feats, att_feats, p_att_feats, state_decoder, att_masks)
         logprobs = F.log_softmax(self.logit(output), dim=1)
 
-        return logprobs, state_decoder, state_blackbox, zt_blackbox
+        return logprobs, state_decoder, state_blackbox, zt_decoder
 
     def _sample_beam(self, fc_feats, att_feats, att_masks=None, opt={}):
         """
-        当使用beam size并且beam size>1时, 转到_sample_beam, 否则就直接按照_sample走
+        当使用beam size并且beam size>1时, 转到_sample_beam函数流程, 否则按照_sample函数流程
 
-        Parameters: 与模型正常forward时传入的必要参数相同，只不过没有mask以及label，当然在test时，也不能有这些
+        Parameters: 与模型正常forward时传入的必要参数相同，只不过没有padding mask以及label，当然在test时，也不能有这些
         opt: 传入一些与test时有关的参数
-        Returns
         """
         beam_size = opt.get('beam_size', 10)
         batch_size = fc_feats.size(0)
@@ -781,7 +784,12 @@ class VAEAoAModel(AttModel):
         return seq.transpose(1, 2), seqLogprobs.transpose(1, 2)
 
     def _sample(self, fc_feats, att_feats, att_masks=None, opt={}):
+        """
+        当不使用beam search时, 按照该函数流程
 
+        Parameters: 与模型正常forward时传入的必要参数相同，只不过没有padding mask以及label，当然在test时，也不能有这些
+        opt: 传入一些与test时有关的参数
+        """
         sample_method = opt.get('sample_method', 'greedy')
         beam_size = opt.get('beam_size', 1)
         temperature = opt.get('temperature', 1.0)
@@ -799,9 +807,6 @@ class VAEAoAModel(AttModel):
 
         seq = fc_feats.new_zeros((self.sample_nums, batch_size, self.seq_length), dtype=torch.long)
         seqLogprobs = fc_feats.new_zeros(self.sample_nums, batch_size, self.seq_length)
-
-        # seq = fc_feats.new_zeros((batch_size, self.seq_length), dtype=torch.long)
-        # seqLogprobs = fc_feats.new_zeros(batch_size, self.seq_length)
 
         for k in range(self.sample_nums):
             state_decoder = self.init_hidden(batch_size)  # init decoder state for each sample
@@ -825,27 +830,27 @@ class VAEAoAModel(AttModel):
                 if decoding_constraint and t > 0:
                     tmp = logprobs.new_zeros(logprobs.size())
                     # tmp.scatter_(1, seq[:, t - 1].data.unsqueeze(1), float('-inf'))
-                    tmp.scatter_(1, seq[k, :, t - 1].data.unsqueeze(1), float('-inf'))
+                    tmp.scatter_(1, seq[k, :, t - 1].data.unsqueeze(1), float('-inf'))  # k sample
                     logprobs = logprobs + tmp
 
                 if remove_bad_endings and t > 0:
                     tmp = logprobs.new_zeros(logprobs.size())
                     # prev_bad = np.isin(seq[:, t - 1].data.cpu().numpy(), self.bad_endings_ix)
-                    prev_bad = np.isin(seq[k, :, t - 1].data.cpu().numpy(), self.bad_endings_ix)
+                    prev_bad = np.isin(seq[k, :, t - 1].data.cpu().numpy(), self.bad_endings_ix)  # k sample
                     # Impossible to generate remove_bad_endings
-                    # tmp[torch.from_numpy(prev_bad.astype('bool')), 0] = float('-inf')
-                    tmp[torch.from_numpy(prev_bad.astype('uint8')), 0] = float('-inf')  # uint8有时会报warning
+                    tmp[torch.from_numpy(prev_bad.astype('bool')), 0] = float('-inf')
+                    # tmp[torch.from_numpy(prev_bad.astype('uint8')), 0] = float('-inf')  # uint8有时会报warning
                     logprobs = logprobs + tmp
 
                 # Mess with trigrams
                 if block_trigrams and t >= 3:
                     # Store trigram generated at last step
                     # prev_two_batch = seq[:, t - 3:t - 1]
-                    prev_two_batch = seq[k, :, t - 3:t - 1]
+                    prev_two_batch = seq[k, :, t - 3:t - 1]  # k sample
                     for i in range(batch_size):  # = seq.size(0)
                         prev_two = (prev_two_batch[i][0].item(), prev_two_batch[i][1].item())
                         # current = seq[i][t - 1]
-                        current = seq[k][i][t - 1]
+                        current = seq[k][i][t - 1]  # k sample
                         if t == 3:  # initialize
                             trigrams.append({prev_two: [current]})  # {LongTensor: list containing 1 int}
                         elif t > 3:
@@ -855,7 +860,7 @@ class VAEAoAModel(AttModel):
                                 trigrams[i][prev_two] = [current]
                     # Block used trigrams at next step
                     # prev_two_batch = seq[:, t - 2:t]
-                    prev_two_batch = seq[k, :, t - 2:t]
+                    prev_two_batch = seq[k, :, t - 2:t]  # k sample
                     mask = torch.zeros(logprobs.size(), requires_grad=False).cuda()  # batch_size x vocab_size
                     for i in range(batch_size):
                         prev_two = (prev_two_batch[i][0].item(), prev_two_batch[i][1].item())
@@ -881,12 +886,12 @@ class VAEAoAModel(AttModel):
                 it = it * unfinished.type_as(it)
                 # seq[:, t] = it
                 # seqLogprobs[:, t] = sampleLogprobs.view(-1)
-                seq[k, :, t] = it
-                seqLogprobs[k, :, t] = sampleLogprobs.view(-1)
+                seq[k, :, t] = it  # k sample
+                seqLogprobs[k, :, t] = sampleLogprobs.view(-1)  # k sample
 
                 # quit loop if all sequences have finished
                 if unfinished.sum() == 0:
                     break
 
         # return seq, seqLogprobs
-        return seq.transpose(0, 1).contiguous(), seqLogprobs.transpose(0, 1).contiguous()
+        return seq.transpose(0, 1).contiguous(), seqLogprobs.transpose(0, 1).contiguous()  # k sample
