@@ -228,11 +228,11 @@ def train(opt):
                 eval_kwargs = {'split': 'val',
                                'dataset': opt.input_json}
                 eval_kwargs.update(vars(opt))
-                # beam_size>1时显示没有done_beams属性，将模型从dp_model替换为model
-                # val_loss, predictions, lang_stats = eval_utils.eval_split(
-                #     dp_model, lw_model.crit, loader, eval_kwargs)
                 val_loss, predictions, lang_stats = eval_utils.eval_split(
-                    model, lw_model.crit, loader, eval_kwargs)
+                    dp_model, lw_model.crit, loader, eval_kwargs)
+                # 在测试时，采用beam_size>1，显示没有done_beams属性，将模型从dp_model替换为model解决该问题
+                # val_loss, predictions, lang_stats = eval_utils.eval_split(
+                #     model, lw_model.crit, loader, eval_kwargs)
 
                 if opt.reduce_on_plateau:
                     if 'CIDEr' in lang_stats:
