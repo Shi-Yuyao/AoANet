@@ -272,7 +272,8 @@ class VAE_AoA_Encoder_Core(nn.Module):
                                       attn,
                                       PositionwiseFeedForward(opt.rnn_size, 2048, 0.1)
                                       if opt.use_ff else None, 0.1)
-        self.layers_r = clones(layer, 6)
+        # 3 layer is enough for sequence row and sequence column
+        self.layers_r = clones(layer, 3)
         self.layers_c = clones(layer, 3)
         self.norm = LayerNorm(layer.size)
 
@@ -298,6 +299,7 @@ class VAE_AoA_Encoder_Core(nn.Module):
 
     def forward(self, refined_p_att_feats, seq_GT, latent_sample_prior, masks_padding, masks_att=None):
         # embedding seq row and column, just row need position encoding
+        batch_size = seq_GT.size(0) // 5
         embedd_seq_GT = self.embed(seq_GT)
         x = self.position_encoded(embedd_seq_GT)
         y = self.embed(seq_GT.t())
@@ -306,9 +308,16 @@ class VAE_AoA_Encoder_Core(nn.Module):
         for layer in self.layers_r:
             x = layer(x, masks_padding)
         cr = self.norm(x)
-        for layer in self.layers_c:
-            y = layer(y, masks_padding.t())
-        cc = self.norm(y)
+        # because 5 captions per image, so seq column's attention caption set must be 5
+        cc = torch.zeros_like(y)
+        for i in range(batch_size):
+            y_i = y[:, i * 5:(i + 1) * 5, :]
+            masks_padding_i = masks_padding.t()[:, i * 5:(i + 1) * 5]
+            for layer in self.layers_c:
+                y_i = layer(y_i, masks_padding_i)
+            cc_i = self.norm(y_i)
+            cc[:, i * 5:(i + 1) * 5, :] = cc_i
+
         # TODO: make cc and cr use add or concatenate？
         c = cr + cc.transpose(0, 1).contiguous()
 
@@ -320,9 +329,11 @@ class VAE_AoA_Encoder_Core(nn.Module):
                                          mask=masks_att)
 
         # cause captions' different length, use expanded padding masks to mask no-mean word positions' attention value
-        new_mask_padding = masks_padding.unsqueeze(-1).expand(c.size(0), c.size(1), c.size(2))
-        new_c = torch.mul(new_c, new_mask_padding)
-        new_c = self.norm(new_c)
+        new_mask_padding_c = masks_padding.unsqueeze(-1).expand(c.size(0), c.size(1), c.size(2))
+        new_c = self.norm(torch.mul(new_c, new_mask_padding_c))
+
+        # cause rnn size and latent size not always same, need generate 2 new mask, one for c and one for z
+        new_mask_padding_z = masks_padding.unsqueeze(-1).expand(c.size(0), c.size(1), self.latent_size)
 
         # A save mu, B save log_var; (2, batch_size, seq_len+1, latent dim); seq_len+1 for <END> token's z_n+1
         latent_space = torch.zeros(2, seq_GT.size(0), seq_GT.size(1) + 1, self.latent_size).cuda()
@@ -338,7 +349,7 @@ class VAE_AoA_Encoder_Core(nn.Module):
             latent_space[0, :, index] = mu
             latent_space[1, :, index] = log_var
             # same as new_c, use expanded padding masks to mask no-mean word positions' latent sample
-            latent_sample_prior = self.reparameterize(mu, log_var) * new_mask_padding[:, index, :]
+            latent_sample_prior = self.reparameterize(mu, log_var) * new_mask_padding_z[:, index, :]
             latent_sample.append(latent_sample_prior)
 
         # TODO: use expanded padding masks to mask new_c and z is feasible?
