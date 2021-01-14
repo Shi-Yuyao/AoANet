@@ -178,6 +178,21 @@ class VAE_AoA_Encoder_Layer(nn.Module):
         return self.sublayer[-1](x, self.feed_forward) if self.use_ff else x
 
 
+class VAE_AoA_Encoder_Layer_S(nn.Module):
+    """
+    without res
+    """
+
+    def __init__(self, size, self_attn):
+        super(VAE_AoA_Encoder_Layer_S, self).__init__()
+        self.self_attn = self_attn
+        self.size = size
+
+    def forward(self, x, mask):
+        output = self.self_attn(x, x, x, mask)
+        return output
+
+
 class VAE_AoA_Encoder_Core(nn.Module):
     """
     input:
@@ -268,14 +283,21 @@ class VAE_AoA_Encoder_Core(nn.Module):
                                        do_aoa=1,
                                        norm_q=0,
                                        dropout_aoa=getattr(opt, 'dropout_aoa', 0.3))
-        layer = VAE_AoA_Encoder_Layer(opt.rnn_size,
-                                      attn,
-                                      PositionwiseFeedForward(opt.rnn_size, 2048, 0.1)
-                                      if opt.use_ff else None, 0.1)
+        # encoder layer with res
+        # layer = VAE_AoA_Encoder_Layer(opt.rnn_size,
+        #                               attn,
+        #                               PositionwiseFeedForward(opt.rnn_size, 2048, 0.1)
+        #                               if opt.use_ff else None, 0.1)
+        # encoder layer without res
+        layer = VAE_AoA_Encoder_Layer_S(opt.rnn_size, attn)
+
         # 3 layer is enough for sequence row and sequence column
-        self.layers_r = clones(layer, 3)
-        self.layers_c = clones(layer, 3)
+        self.layers_r = clones(layer, 3)  # att for row
+        self.layers_c = clones(layer, 3)  # att for column
         self.norm = LayerNorm(layer.size)
+
+        # fc for cat(cr,cc) dimension reduction
+        self.fusion_layer = nn.Linear(opt.rnn_size * 2, opt.rnn_size)
 
         # multi-head attention for seq GT and refined feats
         self.att_p_refined_feats = MultiHeadedDotAttention(opt.num_heads,
@@ -299,7 +321,6 @@ class VAE_AoA_Encoder_Core(nn.Module):
 
     def forward(self, refined_p_att_feats, seq_GT, latent_sample_prior, masks_padding, masks_att=None):
         # embedding seq row and column, just row need position encoding
-        batch_size = seq_GT.size(0) // 5
         embedd_seq_GT = self.embed(seq_GT)
         x = self.position_encoded(embedd_seq_GT)
         y = self.embed(seq_GT.t())
@@ -308,7 +329,8 @@ class VAE_AoA_Encoder_Core(nn.Module):
         for layer in self.layers_r:
             x = layer(x, masks_padding)
         cr = self.norm(x)
-        # because 5 captions per image, so seq column's attention caption set must be 5
+        # because 5 captions per image, so seq column's attention must be limit in caption set
+        batch_size = seq_GT.size(0) // 5
         cc = torch.zeros_like(y)
         for i in range(batch_size):
             y_i = y[:, i * 5:(i + 1) * 5, :]
@@ -318,8 +340,9 @@ class VAE_AoA_Encoder_Core(nn.Module):
             cc_i = self.norm(y_i)
             cc[:, i * 5:(i + 1) * 5, :] = cc_i
 
-        # TODO: make cc and cr use add or concatenate？
-        c = cr + cc.transpose(0, 1).contiguous()
+        # TODO: make cc and cr use plus or concatenate？
+        # c = cr + cc.transpose(0, 1).contiguous() # plus is not effective
+        c = self.fusion_layer(torch.cat([cr, cc.transpose(0, 1).contiguous()], 2))
 
         # each word position make multi-head attention with refined image features to embed image features
         new_c = self.att_p_refined_feats(c,
